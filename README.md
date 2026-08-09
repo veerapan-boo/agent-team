@@ -49,8 +49,99 @@ Four honest caveats, stated up front:
 
 ---
 
+## The shape
+
+**Who is on the team.** One lead that never edits, and four kinds of specialist. The two
+annotations on each box — its **tool access** and its **reasoning effort** — are the levers
+§5.10 and §5.1 are about. Get those wrong and nothing else in this document helps.
+
+```mermaid
+flowchart TD
+    H(["🧑 human"])
+    L["lead / orchestrator<br/>routes · verifies · synthesises<br/>no edit tools — deliberately"]
+
+    H <--> L
+
+    L --> S["scouts<br/>map the codebase<br/>read-only · low effort"]
+    L --> P["planners<br/>blueprint 2+ domain features<br/>read-only · high effort"]
+    L --> W["writers<br/>one disjoint file domain each<br/>edit + shell · medium effort"]
+    L --> R["gates<br/>risk · design · load<br/>read-only · spawned selectively"]
+
+    S -.->|"file map"| P
+    P -.->|"blueprint on disk"| W
+    W -.->|"conclusion-only report"| R
+
+    classDef lead fill:#1f2937,stroke:#111827,color:#f9fafb
+    classDef ro fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    classDef rw fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef human fill:#fff7ed,stroke:#f59e0b,color:#7c2d12
+    class L lead
+    class S,P,R ro
+    class W rw
+    class H human
+```
+
+**How one phase runs.** The loop that produced the numbers above. Every box that fans out does
+so in a *single* message — that is the only thing that actually creates parallelism.
+
+```mermaid
+flowchart LR
+    A["request"] --> B{"scope<br/>clear?"}
+    B -->|no| C["scout + planner<br/>parallel"]
+    B -->|yes| D
+    C --> C2["blueprint<br/>→ written to a file"]
+    C2 --> D["split into briefs"]
+
+    D --> E["foundation<br/>the brief others need<br/>spawn alone, wait"]
+    E --> F["leaves<br/>disjoint file sets<br/>ALL in one message"]
+
+    F --> G{"collect<br/>every result"}
+    G -->|"any PARTIAL?"| H["follow-up brief<br/>naming only what is left"]
+    H --> G
+    G -->|all in| I["gate the wave<br/>not each task"]
+    I -->|FAIL| F
+    I -->|PASS| J["report<br/>quote each agent's own<br/>build · lint · tests"]
+
+    classDef fan fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef gate fill:#fef2f2,stroke:#ef4444,color:#7f1d1d
+    classDef plan fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    class E,F fan
+    class I,G gate
+    class C,C2,D plan
+```
+
+**Proof it works.** A real 20-agent phase, measured. 55 minutes of wall clock, parallel factor
+**1.51×**. One foundation, then waves — and one gate per wave rather than one per task.
+
+```mermaid
+gantt
+    title One phase — foundation, then waves of leaves
+    dateFormat HH:mm:ss
+    axisFormat %H:%M
+    section Foundation
+    T0 scaffold              :done, 20:23:40, 20:25:25
+    section Wave 1 — one message
+    T1 ops/k8s               :active, 20:26:02, 20:33:07
+    T2 ops/aws_batch         :active, 20:26:24, 20:33:04
+    T3 ops/batch_report      :active, 20:26:42, 20:33:01
+    T4 confirm widget        :active, 20:26:58, 20:32:36
+    section Gate
+    verify wave 1            :crit, 20:33:33, 20:35:21
+    section Wave 2 — one message
+    T5 screen A              :active, 20:36:03, 20:40:17
+    T6 screen B              :active, 20:36:22, 20:40:35
+    T7 screen C              :active, 20:36:39, 20:40:06
+```
+
+The four leaves in wave 1 finish within **31 seconds of each other**. That is what
+correctly-sized sibling briefs look like, and it is the clearest signal that the split
+followed real seams in the code rather than an arbitrary line count.
+
+---
+
 ## Contents
 
+- [The shape](#the-shape) — team topology, the delegation loop, a measured phase
 - [1. Where the time actually goes](#1-where-the-time-actually-goes)
 - [2. The measurement method](#2-the-measurement-method)
 - [3. Performance results in full](#3-performance-results-in-full)
@@ -302,27 +393,17 @@ to one file lose work.
 
 #### What it looks like when it works
 
-The same team, one phase after this rule was actually loaded. Times are spawn → finish:
+The measured timeline is charted at the top of this document under
+[The shape](#the-shape) — twenty agents, 55 minutes of wall clock, parallel factor 1.51×.
 
-```
-20:23:40 ─ 20:25:25   T0  scaffold                    ← foundation, alone, waited for
-20:26:02 ─ 20:33:07   T1  ops/k8s            ┐
-20:26:24 ─ 20:33:04   T2  ops/aws_batch      │ four leaves, one message
-20:26:42 ─ 20:33:01   T3  ops/batch_report   │ 7 minutes wall, not 28
-20:26:58 ─ 20:32:36   T4  confirm widget     ┘
-20:33:33 ─ 20:35:21   verify wave 1                   ← one reviewer, for the wave, not per task
-20:36:03 ─ 20:40:17   T5  screen A           ┐
-20:36:22 ─ 20:40:35   T6  screen B           │ three leaves, one message
-20:36:39 ─ 20:40:06   T7  screen C           ┘
-```
+Wave 1 is the part to copy: four leaves spawned in one message finished in **7 minutes of
+wall clock instead of 28**. The shape is the whole rule — **one foundation, then waves of
+leaves, with verification per wave rather than per task.**
 
-Twenty agents, 55 minutes of wall clock, parallel factor 1.51×. The shape is the whole rule:
-**one foundation, then waves of leaves, with verification per wave rather than per task.**
-
-Two details worth copying. The four leaves finish within 31 seconds of each other — that is
-what correctly-sized sibling briefs look like, and it is a good signal that the split followed
-real seams. And the single reviewer covers the whole wave: fan-out does not mean fanning out
-the checking too.
+Two details worth stealing. The four leaves finish within 31 seconds of each other, which is
+what correctly-sized sibling briefs look like and a good signal the split followed real seams.
+And a single reviewer covers the whole wave: fanning out the work does not mean fanning out
+the checking.
 
 ### 5.4 Write briefs that remove exploration
 
@@ -759,23 +840,9 @@ which immediately falsified the duplication hypothesis.
 
 ## 8. Team topology
 
-Both studied teams converged on the same shape, from different starting points.
-
-```
-                      ┌─────────────────┐
-   human ───────────► │  lead / router  │   no edit tools; owns the long-lived context
-                      └────────┬────────┘
-                               │
-        ┌──────────────┬───────┴───────┬──────────────┐
-        ▼              ▼               ▼              ▼
-   ┌─────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐
-   │ scouts  │   │ planners │   │  writers  │   │ reviewers│
-   │read-only│   │read-only │   │  own      │   │ read-only│
-   │ cheap   │   │ high     │   │  disjoint │   │ selective│
-   │ effort  │   │ effort   │   │  files    │   │  not     │
-   └─────────┘   └──────────┘   └───────────┘   │  routine │
-                                                └──────────┘
-```
+Both studied teams converged on the same shape, from different starting points — the diagram
+is at the top of this document under [The shape](#the-shape). This section is the detail
+behind it.
 
 | Layer | Role | Effort | Tools | Turn cap |
 |---|---|---|---|---|
