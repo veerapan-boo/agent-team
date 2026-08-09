@@ -153,6 +153,7 @@ followed real seams in the code rather than an arbitrary line count.
 - [9. Anti-pattern catalogue](#9-anti-pattern-catalogue)
 - [10. Audit checklist](#10-audit-checklist)
 - [11. What is in this repo](#11-what-is-in-this-repo)
+- [12. What published practice adds](#12-what-published-practice-adds) — where external research confirms, extends, and contradicts the above
 
 ---
 
@@ -632,6 +633,99 @@ that changes. Defend against it mechanically:
 
 ---
 
+### 5.14 Know what each role costs before you tune anything
+
+Team-level token numbers hide where the money actually goes. Broken down by role across 116
+runs and 2.84 M output tokens:
+
+| Role | Runs | Total tokens | Share | Cumulative |
+|---|---:|---:|---:|---:|
+| **writer** | 58 | 1,983,680 | **69.9%** | 69.9% |
+| planner | 8 | 297,197 | 10.5% | 80.3% |
+| doc writer | 19 | 258,722 | 9.1% | **89.5%** |
+| scout | 12 | 85,817 | 3.0% | 92.5% |
+| verifier | 8 | 79,870 | 2.8% | 95.3% |
+| *five other roles* | 11 | 133,548 | 4.7% | 100% |
+
+**Three roles are 89.5% of everything.** Tuning the other seven is rounding error. If you only
+ever profile one thing, profile your writers.
+
+Cost per invocation differs by more than 5×, and that is the number that should drive routing:
+
+| Role | Tokens per run | Minutes per run | Tool calls per run |
+|---|---:|---:|---:|
+| planner | 37,149 | 9.2 | 35 |
+| writer | 34,183 | 9.5 | 44 |
+| doc writer | 13,616 | 3.0 | 26 |
+| verifier | 9,983 | 4.0 | 49 |
+| **scout** | **7,151** | **1.6** | 19 |
+
+**A scout costs one fifth of a planner.** That single ratio justifies a routing rule that is
+easy to skip: **send the cheap scout first, always.** Letting an expensive planner do its own
+file discovery burns planner-priced tokens on scout-priced work. Two scouts and one planner
+cost less than one planner that had to find everything itself.
+
+The same ratio argues against the opposite mistake — do not route a genuine design decision to
+a scout because it is cheap. The cost table tells you what a role is *for*, not that cheap is
+better.
+
+#### Tool mix tells you what a role actually does
+
+Declared purpose and observed behaviour diverge more than you would expect:
+
+| Role | Observed tool mix | What it reveals |
+|---|---|---|
+| writer | Bash 43% · Read 29% · Edit 23% | spends more calls on shell than on editing — build/test loops dominate |
+| planner | Read 61% · Grep 32% · Glob 6% | pure comprehension, zero shell. Correct for the role |
+| scout | Read 60% · Bash 31% | a "read-only" scout shelling out for a third of its calls |
+| verifier | **Bash 73%** · Read 26% | not a reviewer — a build runner |
+| design gate | Bash 63% · Read 35% · **Edit 0%** | behaves as read-only despite holding edit tools |
+
+The verifier row is the useful one. A role whose calls are three-quarters shell is not applying
+judgement; it is running commands the writer could have run itself. That is the empirical case
+behind §5.6 — and you can only see it by measuring the mix.
+
+### 5.15 Audit what tools each agent actually uses
+
+Every tool in an agent's list costs schema tokens in its context on every run, and — more
+importantly — a tool an agent holds is a tool it can use. Compare the **declared** tool list
+against **observed** usage. Measured across the same 116 runs:
+
+| Agent | Declared | Never used once | Barely used |
+|---|---|---|---|
+| design gate | Bash, Edit, Glob, Grep, Read, Write | **Write**, Glob, Grep | **Edit — 1 call in 113** |
+| verifier | Bash, Glob, Grep, Read | Glob, Grep | — |
+| deploy | Bash, Glob, Grep, Read | Glob, Grep | — |
+| security | Bash, Glob, Grep, Read | Glob, Grep | — |
+
+Two distinct findings hide in that table.
+
+**The governance one.** Across four runs the design gate made 113 tool calls: 72 shell, 40
+reads, and **exactly one edit**. It never touched `Write` at all. In practice it is a read-only
+reviewer, but the *one hard, tool-level guarantee* available to you (§5.10) is not being
+claimed — and that single edit is precisely why the distinction matters. Remove the tools and
+"this agent does not modify files" stops being an observation about the last four runs and
+becomes a fact about every future one.
+
+If a role genuinely needs to make the occasional fix, that is a different decision — but make
+it deliberately, and stop calling the agent a gate.
+
+**The redundancy one.** Four agents declare `Glob` and never call it; they reach for `Grep` or
+`Read` instead. That is a signal the tool list was copied rather than chosen. Prune it — and
+note the direction of the risk: a missing tool produces a visible failure the agent works
+around, while a surplus tool produces silence.
+
+#### Watch for wrong-case and invented tool names
+
+One verifier run called a tool named `bash` when the tool is `Bash`. One wasted round trip,
+no error anyone would notice, and it appears in the transcript only as a tool name that exists
+nowhere in the agent's declared list.
+
+This is [§9.1's broken reference](#91-broken-references-deserve-their-own-paragraph) at
+runtime rather than in the definition. The check is the same shape and just as cheap: **any
+tool name appearing in a transcript that is not in that agent's declared list is a defect** —
+either a typo the model made, or a tool it needed and did not have. Both are worth knowing.
+
 ## 6. Runtime mechanics that silently eat finished work
 
 These three share a signature: **something works exactly as specified, and it changes
@@ -883,6 +977,12 @@ Each of these was observed and cost measurable time.
 | **Uncollected agent** | a persistent agent goes idle and the lead reads idle as "still working" | 23 min stalled with two finished reports on disk | §6.2 |
 | **Accidental mechanism** | passing a `name:` for a nicer label silently switches how the result comes back | the failure above, and it looks like nothing | §6.2 |
 | **Rule written, not deployed** | editing an agent definition mid-session and assuming it applies | a whole era of measurement with zero structural change | §6.3 |
+| **Over-provisioned agent** | a reviewer holding edit tools it never uses | forfeits the only hard tool-level guarantee you have | §5.15 |
+| **Copied tool list** | `Glob` declared by four agents, called by none | schema tokens on every run, and a signal nobody chose the list | §5.15 |
+| **Wrong-case tool name** | the model calls `bash` when the tool is `Bash` | a silently wasted round trip | §5.15 |
+| **Expensive role doing cheap work** | a planner discovering files a scout could have mapped | planner tokens cost 5× scout tokens | §5.14 |
+| **Flat budget for every task** | the same tool-call budget for a typo fix and a migration | over-serves trivial work, under-serves real work | §12 |
+| **Unbounded fan-out** | spawning more than ~5 concurrent agents | merging summaries costs more than the parallelism saves | §12 |
 | **Reactive continuation** | "finish X" agent after a truncation | ~15–20M tokens per over-scoped phase | §6 |
 | **LLM-per-file codemod** | one agent invocation per identical edit | blows the turn budget | §6 |
 | **Doc drift** | documented hook that was never wired | silent loss of a quality gate | §5.13 |
@@ -931,6 +1031,15 @@ Run after any burst of agent-file edits, and at minimum monthly.
 - [ ] Every agent you spawned this turn appears in the turn's report with its verification
       result — the completeness check that catches an uncollected agent (§6.2).
 - [ ] The session was **restarted** after the last agent-definition or hook change (§6.3).
+- [ ] **Tool allocation audited**: every declared tool is actually used, and no read-only
+      reviewer holds an edit tool (§5.15).
+- [ ] **No tool name appears in a transcript that is absent from that agent's list** — a typo
+      or a missing tool, both worth fixing (§5.15).
+- [ ] You know **which three roles account for ~90% of your tokens**, and your tuning effort
+      is aimed at them (§5.14).
+- [ ] Fan-out is bounded at roughly **5 concurrent agents** (§12).
+- [ ] Tool **descriptions** are unambiguous enough that a human could pick the right tool from
+      them alone (§12).
 - [ ] The **soft budget and partial-report protocol** appear in every writer's definition,
       with "partial is a success" stated explicitly (§5.8).
 - [ ] Verification follows **one** of the two designs in §5.6, end to end — either every
@@ -1000,6 +1109,137 @@ Start here:
 3. Re-measure with `--split-at` set to the moment you applied them.
 4. Then work down the checklist in §10 — [`docs/worked-audit.md`](docs/worked-audit.md) shows
    what that looks like on a team that was already good, and what it found anyway.
+
+---
+
+## 12. What published practice adds
+
+Everything above was measured on two teams. This section checks that work against published
+guidance from Anthropic and independent research — both where it **confirms** what we found
+and, more usefully, where it **contradicts or extends** it.
+
+### Independent numbers that corroborate §1
+
+Anthropic's multi-agent research system reports that **token usage alone explains 80% of
+performance variance**, with tool calls and model choice accounting for most of the rest —
+95% between the three. Our own timing split found agents spending **80% of wall clock
+generating tokens**. Two different measurements, same conclusion: *the token budget is the
+system.*
+
+They also quantify the price of the architecture, which we never did:
+
+| | Token cost |
+|---|---|
+| A single agent vs a chat turn | ~**4×** |
+| A multi-agent system vs a chat turn | ~**15×** |
+| Multi-agent vs single-agent for the same task | **3–10×** |
+
+**Use these as a go/no-go gate, not a target.** A team of agents is worth 15× the tokens only
+when the task genuinely decomposes. If it does not, you are paying a large multiple for
+coordination overhead.
+
+### Five things the published guidance adds that we did not have
+
+**1. Scale the budget to task complexity, not one flat number.** §5.8 gives every task the same
+~40-tool-call soft budget. Anthropic scales it:
+
+| Task shape | Agents | Tool calls each |
+|---|---|---|
+| Simple fact-finding | 1 | 3–10 |
+| Direct comparison | 2–4 | 10–15 |
+| Complex research | 10+ | divided explicitly |
+
+A flat budget over-serves trivial tasks and under-serves genuine ones. Treat 40 as the writer
+default and state a different number in the brief when the task is obviously smaller.
+
+**2. There is an upper bound on fan-out.** §5.3 tells you to fan out and never says when to
+stop. Published guidance: **3–5 concurrent subagents is the sweet spot** — beyond that you
+spend more time merging summaries than you save running them in parallel. Our best measured
+wave was four. That is not a coincidence, and it is worth writing down as a ceiling.
+
+**3. Tool descriptions are a first-class performance lever.** Improving tool descriptions
+produced a **40% decrease in task completion time** in Anthropic's system. Nothing in §5.15
+covers description *quality* — only whether a tool is used. The heuristic they give is the one
+to adopt: *if a human engineer cannot definitively say which tool applies in a given
+situation, an agent will not do better.*
+
+**4. Decompose by context boundary, not by problem type.** This sharpens §5.5. "One module per
+brief" is a proxy; the real rule is that **sequential phases of the same feature belong
+together**, and only genuinely isolated work should split. Two agents that need to share state
+should have been one agent — subagents cannot see each other's context.
+
+**5. Match the mechanism to the kind of rule.** A decision framework we half-had in §5.9,
+stated properly:
+
+| If it is… | Put it in |
+|---|---|
+| a rule that must be **enforced** | a hook or a permission |
+| **contextual knowledge** needed sometimes | a skill, loaded on demand |
+| a **delegation boundary** | a subagent |
+| **always-on** project guidance | the project instruction file — kept short |
+
+The corollary matters as much as the table: **anything loaded every session must earn its
+place.** The published advice is to ask, of each line, *"would removing this cause a mistake?"*
+— and to cut it if not, because a bloated always-on file causes the model to ignore the rules
+that matter.
+
+### Where published guidance contradicts this repo
+
+**Multi-agent systems are described as weakest at exactly what we use them for.** Anthropic's
+own framing is that multi-agent architectures excel at problems that split into parallel
+strands of *research*, and are *"less effective for tightly interdependent tasks such as
+coding."*
+
+That is a direct tension with this document, and it deserves a straight answer rather than a
+footnote. Our reading, with our numbers:
+
+- The warning is about **interdependence**, not about coding as a category. Era C's phase — a
+  scaffold plus seven independent screens — is not tightly interdependent, and it parallelised
+  cleanly at 1.51×.
+- Era A's work — login and setup flows, where each step depended on the last — is exactly the
+  shape the warning describes, and it ran at 0.53×. **The warning showed up in our data.**
+- So the honest rule is not "agent teams are good for coding" but: **fan out only where the
+  work is genuinely disjoint, and accept a serial lead-plus-one-writer shape where it is not.**
+  A parallel factor stuck below 1.0 despite honest fan-out attempts is evidence the *work* is
+  interdependent, not that the team is misconfigured.
+
+**Start with one agent.** The published advice is to reach for a single well-equipped agent
+first, because coordination overhead and extra failure points are real — §6 of this document
+is a catalogue of exactly those failure points. Nothing here argues for a team on a task one
+agent can hold.
+
+### Two mechanisms worth stealing
+
+**An evaluation loop.** This repo measures speed and has no method for measuring *quality*
+beyond a rework count. The published approach is concrete and small: start with **~20
+representative test queries**, score with a single LLM judge against a rubric on fixed
+dimensions (accuracy, completeness, source quality, tool efficiency), and calibrate the judge
+against human labels on a subset. Twenty queries is a morning's work and it turns "the team
+feels better" into a number.
+
+**Resumability over restart.** Production guidance is to build systems that **resume from the
+error point** rather than restarting. That is the same insight as §5.8's `PARTIAL:` protocol
+and §6.1's warm handoff, generalised: every expensive step should leave behind enough state
+that the next agent starts warm.
+
+### One caution on adversarial review
+
+§5.6 and the published guidance both recommend an independent reviewer — and the guidance adds
+a caveat worth quoting, because it is the failure mode of taking review too seriously:
+
+> A reviewer prompted to find gaps will usually report some, even when the work is sound,
+> because that is what it was asked to do. Chasing every finding leads to over-engineering.
+
+Tell reviewers to flag only what affects correctness or the stated requirements, and to treat
+everything else as optional. A reviewer that returns `PASS` with no findings is doing its job.
+
+### Sources
+
+- [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system) — Anthropic Engineering
+- [When to use multi-agent systems (and when not to)](https://claude.com/blog/building-multi-agent-systems-when-and-how-to-use-them) — Anthropic
+- [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — Anthropic Engineering
+- [Claude Code best practices](https://code.claude.com/docs/en/best-practices) — Anthropic
+- [Context Rot: how increasing input tokens impacts LLM performance](https://www.trychroma.com/research/context-rot) — Chroma, 18 models tested
 
 ---
 

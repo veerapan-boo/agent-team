@@ -49,6 +49,7 @@ import datetime as dt
 import glob
 import json
 import os
+import re
 import sys
 
 DEFAULT_ROOT = os.path.expanduser("~/.claude/projects")
@@ -269,6 +270,104 @@ def summarise(agents: list[dict], label: str, cap: int) -> None:
     print("  agent types                " + ", ".join(f"{k}={v}" for k, v in by_type.most_common()))
 
 
+def declared_tools(agents_dir: str) -> dict[str, set[str]]:
+    """Parse `tools:` out of each agent definition's YAML frontmatter."""
+    out: dict[str, set[str]] = {}
+    for path in sorted(glob.glob(os.path.join(agents_dir, "*.md"))):
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        front = text.split("---", 2)[1] if text.count("---") >= 2 else ""
+        m = re.search(r"^tools:\s*(.+)$", front, re.M)
+        if not m:
+            continue
+        # collapse Agent(a, b, c) so its comma list is not split
+        raw = re.sub(r"Agent\([^)]*\)", "Agent", m.group(1))
+        name = os.path.basename(path)[:-3]
+        out[name] = {t.strip() for t in raw.split(",") if t.strip()}
+    return out
+
+
+def by_agent(agents: list[dict], agents_dir: str) -> None:
+    """Per-role economics: where the tokens go, what each run costs, tool mix."""
+    roles: dict[str, dict] = {}
+    for a in agents:
+        r = roles.setdefault(a["type"], {"n": 0, "out": 0, "dur": 0.0, "calls": 0,
+                                         "tools": collections.Counter()})
+        r["n"] += 1
+        r["out"] += a["out"]
+        r["dur"] += a["duration"]
+        r["calls"] += a["tool_calls"]
+        r["tools"].update(a["tools"])
+
+    total = sum(r["out"] for r in roles.values()) or 1
+    ranked = sorted(roles.items(), key=lambda kv: -kv[1]["out"])
+
+    print("\n===== where the tokens go =====")
+    print(f"  {'role':22} {'runs':>5} {'tokens':>12} {'share':>7} {'cumulative':>11}")
+    cum = 0
+    for name, r in ranked:
+        cum += r["out"]
+        print(f"  {name[:22]:22} {r['n']:5} {r['out']:12,} {100 * r['out'] / total:6.1f}% "
+              f"{100 * cum / total:10.1f}%")
+    print(f"  {'':22} {sum(r['n'] for r in roles.values()):5} {total:12,}")
+
+    print("\n===== cost per run =====")
+    print(f"  {'role':22} {'tok/run':>10} {'min/run':>9} {'calls/run':>10}")
+    for name, r in sorted(roles.items(), key=lambda kv: -kv[1]["out"] / max(kv[1]["n"], 1)):
+        print(f"  {name[:22]:22} {r['out'] // r['n']:10,} {r['dur'] / 60 / r['n']:9.1f} "
+              f"{r['calls'] // r['n']:10}")
+    # Compare only roles with enough runs to mean something; a single one-off
+    # spawn produces a meaningless ratio.
+    solid = {k: v for k, v in roles.items() if v["n"] >= 3 and v["out"]}
+    if len(solid) >= 2:
+        cheapest = min(solid.items(), key=lambda kv: kv[1]["out"] / kv[1]["n"])
+        dearest = max(solid.items(), key=lambda kv: kv[1]["out"] / kv[1]["n"])
+        ratio = (dearest[1]["out"] / dearest[1]["n"]) / (cheapest[1]["out"] / cheapest[1]["n"])
+        print(f"\n  {dearest[0]} costs {ratio:.1f}x a {cheapest[0]} per run "
+              f"(roles with 3+ runs) -- route the cheap role first.")
+
+    print("\n===== tool mix per role =====")
+    for name, r in ranked:
+        s = sum(r["tools"].values())
+        if not s:
+            continue
+        mix = "  ".join(f"{k}={100 * v // s}%" for k, v in r["tools"].most_common(5))
+        print(f"  {name[:22]:22} {mix}")
+
+    decl = declared_tools(agents_dir)
+    if not decl:
+        print(f"\n  (no agent definitions found under {agents_dir} -- "
+              f"pass --agents-dir to audit tool allocation)")
+        return
+
+    print("\n===== declared vs actually used =====")
+    print(f"  {'agent':22} {'never used':28} {'used but not declared'}")
+    findings = 0
+    for name, tools in sorted(decl.items()):
+        r = roles.get(name)
+        if not r:
+            continue
+        used = {k for k in r["tools"] if k}
+        # Skill-style always-available tools are not worth flagging
+        unused = tools - used - {"Skill"}
+        extra = used - tools
+        if not unused and not extra:
+            continue
+        findings += 1
+        print(f"  {name[:22]:22} {','.join(sorted(unused)) or '-':28} "
+              f"{','.join(sorted(extra)) or '-'}")
+    if not findings:
+        print("  every declared tool is used and nothing undeclared was called.")
+    else:
+        print("\n  A read-only reviewer holding an unused edit tool forfeits the only hard,")
+        print("  tool-level guarantee available. A tool used but not declared is a typo the")
+        print("  model made, or a tool it needed and did not have. Both are defects.")
+
+
 def detail(agents: list[dict]) -> None:
     print(f"\n{'start':8} {'dur':>7} {'turns':>6} {'tools':>6} {'out_tok':>9}  {'type':16} description")
     for a in sorted(agents, key=lambda x: x["start"]):
@@ -313,6 +412,10 @@ def main() -> int:
     ap.add_argument("--cap", type=int, default=50, help="hypothetical maxTurns to evaluate (default: 50)")
     ap.add_argument("--idle-gap", type=float, default=600.0, help="ignore message gaps longer than this (seconds)")
     ap.add_argument("--detail", action="store_true", help="print one line per agent")
+    ap.add_argument("--by-agent", action="store_true",
+                    help="per-role economics: token share, cost per run, tool mix")
+    ap.add_argument("--agents-dir", default=".claude/agents",
+                    help="with --by-agent: compare declared tools against observed usage")
     ap.add_argument("--list", action="store_true", help="list visible projects and sessions, then exit")
     args = ap.parse_args()
 
@@ -360,6 +463,9 @@ def main() -> int:
         summarise(agents, args.project, args.cap)
         if args.detail:
             detail(agents)
+
+    if args.by_agent:
+        by_agent(agents, args.agents_dir)
 
     return 0
 
