@@ -1,0 +1,666 @@
+# Building an Agent Team That Is Actually Fast
+
+Practical, **measured** guidance for running a team of AI coding subagents (Claude Code
+`.claude/agents/`, or any orchestrator/worker setup with the same shape).
+
+Everything here comes from instrumenting two real production agent teams and reading the
+raw session transcripts — not from intuition about what *ought* to be faster. Where a rule
+is unproven, it says so. Where a rule was tried and **failed** to move the number, it says
+that too.
+
+---
+
+## TL;DR — what changed when the rules below were applied
+
+One team, one codebase, same task type (porting a desktop app to a terminal UI), same
+models. **76 subagent runs** measured across the two eras.
+
+| Metric | Before rules | After rules | Change |
+|---|---:|---:|---|
+| **Wall clock per delivered agent** | 18.6 min | **5.9 min** | **−68%** |
+| **Slowest single agent** | 43.9 min | **11.5 min** | **−74%** |
+| Agents taking over 20 min | 7 of 47 (15%) | **0 of 29 (0%)** | eliminated |
+| Output tokens — median agent | 17,387 | 11,850 | −32% |
+| Output tokens — worst agent | 177,085 | 42,039 | −76% |
+| Tool calls — worst agent | 174 | 59 | −66% |
+| Conversation turns — p90 | 204 | 97 | −52% |
+| Context re-read per agent | 12.34 M tok | 3.86 M tok | −69% |
+| `Read` calls per agent | 18.2 | 9.4 | −48% |
+| Parallel factor (agents running at once) | 0.53× | 0.83× | +57% |
+| **Rework agents** (spawned only to fix a previous agent's output) | 7 of 47 (15%) | **0 of 29 (0%)** | eliminated |
+
+Three honest caveats, stated up front:
+
+1. **Median duration barely moved** (4.0 → 4.4 min) while the *maximum* collapsed. The rules
+   did not make a typical agent faster — they removed the catastrophic tail. That tail was
+   where the hours went.
+2. The two eras delivered different feature phases of the same port. Scope is comparable
+   (2–3 phases each) but not identical, so treat per-agent metrics as solid and
+   whole-session totals as indicative.
+3. These figures are a snapshot of a session that was still running when they were taken.
+   Re-running the measurement script will give slightly different totals and identical
+   conclusions.
+
+---
+
+## Contents
+
+- [1. Where the time actually goes](#1-where-the-time-actually-goes)
+- [2. The measurement method](#2-the-measurement-method)
+- [3. Performance results in full](#3-performance-results-in-full)
+- [4. Quality results](#4-quality-results)
+- [5. The principles](#5-the-principles)
+- [6. Turn caps: two valid designs, one fatal mistake](#6-turn-caps-two-valid-designs-one-fatal-mistake)
+- [7. Rules that did *not* work](#7-rules-that-did-not-work)
+- [8. Team topology](#8-team-topology)
+- [9. Anti-pattern catalogue](#9-anti-pattern-catalogue)
+- [10. Audit checklist](#10-audit-checklist)
+- [11. What is in this repo](#11-what-is-in-this-repo)
+
+---
+
+## 1. Where the time actually goes
+
+This is the single most important finding, and it invalidates most intuitive optimisation.
+
+Splitting every subagent's timeline into *waiting for the model to produce tokens* vs
+*waiting for a tool to run*:
+
+| | Generating tokens | Running tools | Generation rate |
+|---|---:|---:|---:|
+| Before rules | **80%** of agent time | 20% | 104 tok/s |
+| After rules | 67% | 33% | 113 tok/s |
+
+**The build is not your bottleneck. The model talking to itself is.**
+
+Practical consequence — latency is roughly:
+
+```
+seconds ≈ output_tokens / 110
+```
+
+So every effective rule is about **producing fewer output tokens**, not about running fewer
+or faster commands. Two corollaries that follow directly:
+
+- **Reasoning effort is the biggest single lever.** In the measured "before" era, extended
+  thinking was ~65% of all tokens the agents generated. Three individual API calls hit the
+  64,000-token thinking cap — roughly ten minutes each, for one step. Setting reasoning
+  effort *per agent role* (see §5.1) beats every other tuning knob.
+- **Each extra tool call costs real time.** Measured: **520–756 output tokens per tool call**,
+  which at the rates above is **5–7 seconds each**. A rule that saves input tokens by adding
+  tool calls is usually a net loss.
+
+Note the healthy direction of travel in the table: after the rules, the share of time spent
+generating *dropped* and the share spent actually running tools *rose*. The agents got more
+done per token, which is exactly the intended shape.
+
+---
+
+## 2. The measurement method
+
+Claude Code writes a JSONL transcript per session and one per subagent. Everything above is
+derived from those files — no instrumentation, no wrapper, nothing to install.
+
+```
+~/.claude/projects/<project-slug>/<session-id>.jsonl          # the lead's transcript
+~/.claude/projects/<project-slug>/<session-id>/subagents/
+        agent-<id>.jsonl                                       # one per subagent run
+        agent-<id>.meta.json                                   # agentType, description
+```
+
+`scripts/measure-agent-team.py` in this repo reads that tree and prints the whole table.
+Run it against your own sessions:
+
+```bash
+python3 scripts/measure-agent-team.py --project <project-slug>
+python3 scripts/measure-agent-team.py --project <slug> --split-at 2026-01-15T09:00:00Z
+```
+
+The `--split-at` flag produces the before/after comparison: apply a change, then split the
+session at the moment you applied it.
+
+Three measurement details that matter, because getting them wrong changes the conclusions:
+
+- **De-duplicate by `message.id`, keeping the maximum `output_tokens`.** Streaming writes
+  the same assistant message several times with growing usage; naive summing inflates token
+  counts several-fold.
+- **Count a re-read as wasteful only within one agent, and only with no intervening edit.**
+  Counting duplicate reads across different agents produces a scary ~70% "waste" figure that
+  is not waste at all — different agents legitimately need the same file. The honest,
+  same-agent, no-edit-in-between number is ~15%.
+- **Drop inter-message gaps over ~10 minutes** when splitting generate-time from tool-time,
+  or a human reading a report gets counted as model latency.
+
+Full methodology, including the exact JSONL fields: [`docs/measurements.md`](docs/measurements.md).
+
+---
+
+## 3. Performance results in full
+
+**Era A — no discipline rules.** 47 subagents, 14.53 h wall clock.
+**Era B — discipline rules applied.** 29 subagents, 2.84 h wall clock.
+
+| | Era A | Era B |
+|---|---:|---:|
+| Agents | 47 | 29 |
+| Wall clock | 14.53 h | 2.84 h |
+| Sum of agent runtimes | 7.65 h | 2.35 h |
+| Parallel factor (sum ÷ wall) | 0.53× | 0.83× |
+| Wall clock per agent | 18.6 min | 5.9 min |
+| Duration — median | 4.0 min | 4.4 min |
+| Duration — max | 43.9 min | 11.5 min |
+| Agents > 20 min | 7 (15%) | 0 (0%) |
+| Output tokens — median | 17,387 | 11,850 |
+| Output tokens — max | 177,085 | 42,039 |
+| Output tokens — total | 1,707,042 | 455,245 |
+| Tool calls — median | 39 | 33 |
+| Tool calls — max | 174 | 59 |
+| Turns — median / p90 / max | 68 / 204 / 307 | 56 / 97 / 118 |
+| Cache read per agent | 12.34 M | 3.86 M |
+| Startup context per agent (median) | 27,361 | 37,337 |
+| `Read` calls per agent | 18.2 | 9.4 |
+| Distinct files read per agent (median) | 8 | 5 |
+| Partial reads (`offset`/`limit`) | 49% | 53% |
+| Output tokens per tool call | 756 | 520 |
+
+The row that explains the biggest win: **turns at p90 fell from 204 to 97.** The typical
+agent was never the problem. The problem was a long tail of agents that ran for hundreds of
+turns, re-reading a growing context on every one of them.
+
+The row that shows the remaining work: **parallel factor 0.82×.** A value below 1.0 means
+that most of the time, exactly one agent was running. Fan-out is still the largest
+unexploited lever in both teams studied.
+
+---
+
+## 4. Quality results
+
+Speed rules are worthless if they trade away correctness. They did not.
+
+| Quality signal | Era A | Era B |
+|---|---:|---:|
+| **Rework agents** — spawned only to fix a previous agent's output | 7 of 47 (**15%**) | 0 of 29 (**0%**) |
+| Agents killed by a turn cap with no report | 0 (cap was far above use) | 0 |
+| Test suite after the era's work | passing | **295 tests passing, 0 failed** |
+| Linter warnings | — | **0** |
+| Files exceeding the size limit | 2 (2,248 and 999 lines) | 0 |
+
+The rework agents in Era A are worth naming, because they are the concrete cost of the
+anti-patterns in §9. Every one was avoidable:
+
+```
+Fix fabricated example in contract doc      ← agent invented an identifier it never read
+Fix wrong API names in shared guide         ← same cause
+Correct phase-doc accuracy                  ← same cause
+Fix field count in phase doc                ← same cause
+Fix startup flow and clipboard fallback     ← reported "done" on an unverified build
+Fix sign-in review findings                 ← same cause
+Fix a lockfile/gitignore conflict           ← same cause
+```
+
+Roughly **1.4 hours** of the measured session went to rework. Four shell commands run
+*inside* the original agent (§5.6) would have caught almost all of it.
+
+The measured quality mechanism is simple: **verification must happen inside the agent that
+did the work, not in a separate reviewer afterwards.** A reviewer spawned as a routine tail
+is a duplicate build that produces no new information; a reviewer spawned *selectively*, for
+genuinely high-risk changes, is worth its cost.
+
+---
+
+## 5. The principles
+
+Ordered by measured impact. The first three account for most of the gain.
+
+### 5.1 Set reasoning effort per role, not per session
+
+Extended thinking was ~65% of all generated tokens, and generated tokens are ~80% of wall
+time. A single session-wide "think hard" setting therefore taxes every trivial task.
+
+Assign effort by what the role actually decides:
+
+| Effort | Roles | Why |
+|---|---|---|
+| **high** | architect, requirements analyst, debugger, security auditor | Output is a *decision*; thinking is the product |
+| **medium** | implementers, refactorers, design reviewers | Decision is already made; thinking is overhead past a point |
+| **low** | doc writers, verifiers, build/release, scouts, task trackers | Mechanical or lookup work |
+| **inherit** | the orchestrator/lead | Leave it under the human's control |
+
+Raise an individual agent's effort only when its output quality is *observably* failing, and
+record why.
+
+### 5.2 Cap file size, and split along seams that already exist
+
+A file the agents read repeatedly is a recurring tax. One 2,248-line file in the measured
+codebase was read **85 times**; at roughly 12 tokens per line that is ~28k tokens per read.
+
+| File type | Hard cap | Start planning the split |
+|---|---:|---:|
+| Implementation source | **800 lines** | 600 |
+| Test-only file | **1000 lines** | 800 |
+| Documentation | **500 lines** | 400 |
+
+**But smaller is not monotonically better — the curve is U-shaped**, and this surprises
+people. Three measured facts explain why:
+
+- **About half of all reads already used `offset`/`limit`** (49% → 53%). Agents were already
+  reading only the region they needed out of big files, so shrinking those files does not
+  remove input tokens they were never paying for.
+- **Every additional file to open costs 520–756 output tokens — 5–7 seconds.** That is the
+  measured price of one tool call. Splitting one concept across three files bills that price
+  twice more for every agent that needs the concept.
+- **The number of files an agent touches is set by brief scoping, not by file size.** It fell
+  from a median of 8 to 5 across the two eras — during which the *code got split into more,
+  smaller files*, which should have pushed it up. What actually moved it was tighter briefs
+  (§5.5). Slicing code finer does not reduce what an agent must understand; it fragments the
+  same understanding across more round trips.
+
+So the target is **one concern per file** — which in practice lands around 200–600 lines —
+and 800 is the *ceiling*, not the goal. Splitting a 750-line file into three 250-line files
+adds two round trips for every agent that needs the whole concept and saves nothing.
+
+Split along a seam that already exists (state / rendering / parsing / IO). **If no seam
+exists, the file has a design problem — say so instead of cutting it arbitrarily.**
+
+### 5.3 Fan out: one message, many spawns
+
+Parallelism only happens when multiple spawn calls are emitted in a **single** response.
+Spawning one, awaiting it, then spawning the next is serial — and it is the default
+behaviour unless the lead is explicitly told otherwise.
+
+Sort implementation briefs into two piles before spawning:
+
+| Pile | Test | Action |
+|---|---|---|
+| **Foundation** | another brief needs its types/functions/module to exist | spawn alone, wait |
+| **Leaf** | touches only its own module; consumes the foundation read-only | spawn **all of them in one message** |
+
+Screens, pages, and route handlers are almost always leaves — separate files by
+construction. Two measured misses:
+
+- Six documentation tasks with **no overlapping files** were spawned back to back: 20
+  minutes that should have been about 7.
+- Five implementation agents ran strictly in sequence; the last two touched two different
+  screens and shared no file — 12 minutes serial where ~6 would have done.
+
+The trap that causes most missed fan-outs: two leaf briefs both need to add one line to a
+shared registry file. **Make that one edit yourself before spawning** — do not serialize two
+whole screens because of a single shared line.
+
+Hard constraint: **never fan out two agents that will edit the same file.** Concurrent edits
+to one file lose work.
+
+### 5.4 Write briefs that remove exploration
+
+A subagent starts with an empty context. Anything the lead already knows and does not pass
+on, the subagent pays to rediscover. Every brief carries:
+
+- the **exact file paths** to change (the lead has search tools — use them before delegating),
+- the **decision already made**, not the question (if the approach is still open, that is an
+  architect task, not an implementer task),
+- the **acceptance check** — the command that must pass for this to be done.
+
+This costs input tokens and is worth it. Measured: after briefs got richer, per-agent startup
+context rose by ~4.4k tokens **uniformly across every agent type** — including agent types
+whose definition files were never touched — while total context re-read per agent fell 69%
+and durations collapsed. Paying 4k once to save an agent from exploring is a good trade.
+
+> Watch for this specific misattribution: a uniform startup-context rise across agents whose
+> definitions did not change is caused by **longer briefs**, not by bloated agent files.
+> Measure per agent type before blaming the wrong thing — an earlier draft of this document
+> got that backwards.
+
+### 5.5 One module or one screen per brief
+
+A brief that spans two screens plus configuration plus docs is three briefs. The worst
+single run measured took **159 API round trips and 42 minutes**. A brief you cannot state in
+three sentences is too big.
+
+### 5.6 Verification runs inside the agent that did the work
+
+Every code-writing agent runs the project's Definition of Done *before reporting* — not in a
+later pass:
+
+```bash
+<build>            # zero warnings
+<lint --all>       # zero warnings
+<test>
+<check that frozen/untouchable paths are still clean>
+```
+
+Then **do not spawn a routine reviewer.** A reviewer appended to every task is a duplicate
+build producing no new information. Spawn one only for an independent second opinion on
+security-sensitive work, auth/token paths, or a task whose own agent reported partial
+results.
+
+There is a subtle failure here worth calling out: in the studied team the "no routine
+reviewer" rule was written in prose, but **five flow diagrams in the same file still said
+"spawn reviewer"** — and the diagrams won every time. *When a rule contradicts a diagram, the
+diagram wins.* Fix both or fix neither.
+
+### 5.7 Reading and writing discipline
+
+| Rule | Measured reason |
+|---|---|
+| Search before reading any file over ~400 lines, then read with `offset`/`limit` | whole-file reads of a 2,248-line file, 85 times |
+| Never re-read an unchanged file | ~15% of reads were exactly this |
+| A *legitimate* re-read is still a **partial** read — after editing, re-read only the region | see §7: the plain "don't re-read" rule alone did not work |
+| Never read a file back to verify an edit | the edit tool already fails loudly |
+| Edit, never rewrite, an existing file | one agent spent 35k output tokens on edit payloads and 6k on whole-file writes |
+| Truncate noisy command output (`… 2>&1 \| tail -40`) | a full build log stays in context for every later turn |
+| **Never write an identifier you have not read this session** | 4 of the 7 rework agents existed solely to fix invented names |
+
+That last one is the highest-value rule in the table. Function names, struct fields, config
+keys, CLI flags: if it was not read from source in this session, do not write it. Cite
+`file:line` in the report for anything non-obvious.
+
+### 5.8 Give agents a soft budget and a mandatory partial report
+
+Roughly **40 tool calls** per delegated task, unenforced — a line the agent is expected to
+notice. On reaching it without finishing:
+
+1. Stop adding scope. No "while I'm here".
+2. Get the tree compiling. A half-finished change that builds is recoverable; one that does
+   not is a net loss.
+3. Report **`PARTIAL:`** explicitly — what is done and verified, what is not (as a list the
+   next agent can pick up verbatim), and any decision the next agent must not re-litigate.
+
+State plainly in the agent definition that **reporting partial work is a success.** Without
+that, agents optimise for appearing complete.
+
+The lead must handle a partial report correctly: do **not** re-delegate the whole task — the
+finished part is already on disk. Spawn a follow-up naming only the remaining work, and
+surface the partial status to the human. Never round a partial up to "done".
+
+### 5.9 Enforce the return contract with a hook, not with politeness
+
+The lead's context window has to survive the entire goal. A specialist that ends its turn by
+pasting a large diff or log dump pins that noise in the lead's context forever.
+
+Asking for "conclusion-only reports" in the agent definition is a *request*. A stop-hook that
+inspects the final message and rejects oversized fenced blocks is a *constraint*. See
+[`hooks/subagent-return-contract.py`](hooks/subagent-return-contract.py) for a working,
+fail-open implementation.
+
+This generalises: **prose rules govern judgement; hooks govern behaviour.** §7 is the
+evidence for why the distinction matters.
+
+### 5.10 One owner per file
+
+Assign every file or directory to exactly one agent, written down as a table. Where two
+agents could plausibly claim a file, fix the owner and record the reasoning. Watch for
+"name twins" — `foo.py` in one service and `foo.js` in another — and state explicitly that
+they are never cross-edited.
+
+Note the limit honestly: unless your runtime supports per-agent path permissions, this is
+enforced by **delegation discipline, not by a hard access-control list**. The only hard
+tool-level guarantee available is withholding edit tools entirely from read-only reviewers.
+Do that for every reviewer.
+
+### 5.11 The lead routes; it does not edit
+
+Give the orchestrator no edit or write tools. It reads, routes, verifies and synthesises;
+every file change — including documentation — is delegated. This keeps the one long-lived
+context window clean and forces the ownership model to be real.
+
+A useful corollary: **do not make the team lead the session default** if the same project
+also fields off-topic questions. Routing "what does this env var do?" through delegation
+ceremony is pure overhead. Make team mode opt-in at session start.
+
+### 5.12 Keep shared rules in one place
+
+Project-level instruction files are injected into **every** subagent's context
+automatically. Repeating the same rules inside each agent definition makes each spawn pay
+for them twice.
+
+Verify this for your own runtime before relying on it — in Claude Code, an agent definition
+can carry a flag to *omit* the project instructions, and at least one built-in agent sets it.
+Check, do not assume. Then: shared rules live in the project instruction file; agent
+definitions link to it and add only what is genuinely role-specific.
+
+Expect a modest win. Measured saving from removing the duplication: **~300–560 tokens per
+spawn** — real, but an order of magnitude smaller than §5.1–5.3.
+
+### 5.13 Treat documentation drift as a first-class failure
+
+The most sophisticated team studied documents four quality hooks. Reading its actual
+configuration, **three exist**; the fourth was documented and never wired, in a file whose
+own maintenance section opens: *"Doc drift is the #1 real-world failure of agent teams."*
+
+That is not carelessness — it is the normal end state of any document describing a system
+that changes. Defend against it mechanically:
+
+- **Change-propagation ritual.** Any change to a team-wide mechanism triggers a grep for the
+  old term across all agent definitions and team docs, and an update pass over every hit, in
+  the **same** change set.
+- **Intentional deviations need a doc pass too**, with the reason — otherwise the next
+  auditor reads them as accidents and "fixes" them back.
+- **Config beats docs.** Answer "is X actually enabled?" by reading the configuration file
+  and running the hook. Never by trusting the document.
+- Re-audit after any burst of agent-file edits, and at minimum monthly.
+
+---
+
+## 6. Turn caps: two valid designs, one fatal mistake
+
+Both teams studied cap how long a subagent may run. They chose **opposite** values, and both
+are defensible — because the cap is not a standalone knob. It is half of a system.
+
+First, the mistake. A hard turn cap does not ask the agent to wrap up. It **aborts the run
+mid-sentence, and the human gets no report at all** — the work done so far is orphaned on
+disk with nothing describing it.
+
+Now the measured turn distribution, across 76 real subagent runs:
+
+| Population | Median turns | p90 | Max | Would exceed a cap of 50 |
+|---|---:|---:|---:|---:|
+| All agents | 60 | 142 | 307 | **64%** |
+| Writers (implementers, doc writers) | 67 | 157 | 307 | 61% |
+| Read-only (scouts, reviewers, architects) | 58 | 113 | 166 | 76% |
+
+Note that this holds *after* the discipline rules: even in the improved era, 66% of agents
+still ran past 50 turns. Shorter agents are not the same thing as few-turn agents.
+
+### Design 1 — low cap plus a pre-split scoping discipline
+
+Cap writers at ~50 turns, and make it work by **never spawning a task that could exceed it**:
+
+- **Decide from file count at plan time, because turn count is unpredictable.** In that
+  team, one complex single file ran 25 turns while a six-file task ran 49. File count is the
+  only signal available *before* spawning: **≤4–5 files → one spawn; 6+ files, or one very
+  large file, or a whole migration phase → pre-split** into ~4-file chunks.
+- **Aim for ~30 turns, not the full 50.** The ~20-turn buffer absorbs the variance.
+- **Hand the specialist its exact file list** so its budget goes into editing, not searching.
+- **Pre-split with a warm handoff.** Part 1 reports `done: <files migrated> / remaining:
+  <files still on the old pattern>` and leaves the tree building; part 2 receives that status
+  and continues *warm*. A truncation followed by a cold "finish the job" agent reloads the
+  whole context and roughly doubles the cost of that slice. That team measured a single
+  over-scoped phase burning ~10M tokens, hitting the cap, then ~8M more to redo the same
+  context — **~15–20M tokens avoidable per over-scoped phase**.
+- **Mechanical bulk edits become a codemod, not one agent invocation per file.** For an
+  identical transform across many call sites, have one specialist write and run a script
+  once — zero model turns per file — then hand-edit only the sites that do not fit.
+- **Do not simply raise the cap.** An agent running to ~100 turns re-reads its now-huge
+  context every turn and loses coherence over a long edit.
+
+The subagent **cannot see its own turn counter**, so it cannot self-rescue before the cap.
+The reliable lever is the lead's scoping, never the worker's restraint. That is the whole
+reason this design needs the discipline attached.
+
+### Design 2 — high cap plus a soft budget and mandatory partial reports
+
+Set the hard cap as a **runaway backstop only** — comfortably above the worst run ever
+observed (measured worst: 167 turns → cap set at 200) — and control length with the soft
+budget and `PARTIAL:` protocol from §5.8.
+
+Result in the measured era: **maximum 118 turns, zero agents killed, zero silent
+disappearances.**
+
+### Choosing
+
+| | Design 1 (low cap) | Design 2 (high backstop) |
+|---|---|---|
+| Requires | disciplined pre-split scoping by the lead | disciplined self-reporting by the worker |
+| Fails when | the lead over-scopes → silent truncation | the worker keeps going → long expensive runs |
+| Best for | large mechanical migrations, many similar files | exploratory feature work, unpredictable scope |
+| Cost of failure | high (orphaned work, cold restart) | moderate (one slow agent) |
+
+**The fatal mistake is a low cap with neither discipline.** Applying a 50-turn cap to the
+measured team as it actually behaved would have killed **64% of its agents with no report**.
+If you set a low cap, you must own the scoping. If you cannot guarantee the scoping, set the
+cap high and invest in partial reporting instead.
+
+---
+
+## 7. Rules that did *not* work
+
+Publishing only the wins would make this document useless. Two rules were applied and
+measured, and did not do what was expected.
+
+**Prose alone did not stop redundant reads.** "Never re-read an unchanged file" was written
+into the shared instructions. Same-agent re-reads with no intervening edit: **16% before,
+15% after.** No meaningful change. What *did* fall was the absolute read count per agent
+(18.2 → 9.4) — and that came from splitting the oversized files, not from the rule. The
+rewrite that followed replaced the prohibition with a mechanic: *if you must look again,
+re-read only the region, with `offset`/`limit`.* A behaviour a hook can check beats an
+instruction an agent can drift past — see §5.9.
+
+**Trimming the shared instruction file was the smallest win of six changes.** The project
+instruction file was cut and de-duplicated, and the net saving was **~300–560 tokens per
+spawn** against a ~36,000-token startup context. Worth doing; not worth doing first. It was
+initially estimated at 8,000 tokens per spawn — an order of magnitude too high, because the
+rise in startup context had been misattributed to duplication when it was actually caused by
+richer briefs (§5.4).
+
+The transferable lesson: **measure per agent type before attributing a change.** Agent types
+whose definitions were never edited moved by exactly the same amount as the ones that were —
+which immediately falsified the duplication hypothesis.
+
+---
+
+## 8. Team topology
+
+Both studied teams converged on the same shape, from different starting points.
+
+```
+                      ┌─────────────────┐
+   human ───────────► │  lead / router  │   no edit tools; owns the long-lived context
+                      └────────┬────────┘
+                               │
+        ┌──────────────┬───────┴───────┬──────────────┐
+        ▼              ▼               ▼              ▼
+   ┌─────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐
+   │ scouts  │   │ planners │   │  writers  │   │ reviewers│
+   │read-only│   │read-only │   │  own      │   │ read-only│
+   │ cheap   │   │ high     │   │  disjoint │   │ selective│
+   │ effort  │   │ effort   │   │  files    │   │  not     │
+   └─────────┘   └──────────┘   └───────────┘   │  routine │
+                                                └──────────┘
+```
+
+| Layer | Role | Effort | Tools | Turn cap |
+|---|---|---|---|---|
+| **Lead** | routing, synthesis, composing the change summary | inherit | read + search + spawn; **no edit** | none |
+| **Scouts** | map the codebase, find owners and patterns | low | read-only | none needed |
+| **Planners** | blueprint features spanning 2+ domains | high | read-only | none needed |
+| **Writers** | implement, one disjoint file domain each | medium | read + edit + shell | see §6 |
+| **Reviewers** | risk / design / load-test gates | medium–high | read-only, **no edit tool** | none needed |
+
+Sizing observed in practice: **12–17 agents** total. Domain writers split by *architectural
+boundary* (engine / API / UI / data / infra), never by task type — task-type splits create
+file-ownership collisions immediately.
+
+One warning from the field: a model-alias environment variable that silently upgraded every
+`model: haiku` agent to a frontier model was live in one team's configuration, documented as
+deliberate. Cheap scouts were not cheap. **Verify the model each agent actually runs on**,
+not the one its definition names.
+
+---
+
+## 9. Anti-pattern catalogue
+
+Each of these was observed and cost measurable time.
+
+| Anti-pattern | What it looks like | Measured cost | Fix |
+|---|---|---|---|
+| **Fabricated identifier** | agent writes a function/field/flag name it never read | 4 rework agents | §5.7 last row |
+| **Unverified "done"** | reports success without running the build | 3 rework agents, ~1.4 h total | §5.6 |
+| **Serial-by-habit** | spawning independent tasks one at a time | 20 min where 7 would do; 12 min where 6 would do | §5.3 |
+| **Mega-brief** | one task spanning several screens and configs | 159 round trips, 42 min | §5.5 |
+| **Routine reviewer tail** | a review agent appended to every task | ~9 min per two phases, zero new information | §5.6 |
+| **Diagram/prose contradiction** | rule says "don't", flow chart says "do" | rule silently ignored | §5.6 |
+| **Oversized file** | 2,248-line source file | read 85 times at ~28k tokens each | §5.2 |
+| **Over-splitting** | files cut below one-concern size | +8 s per extra tool call, no token saving | §5.2 |
+| **Cap without scoping** | low turn limit, unbounded task size | would kill 65% of runs, no report | §6 |
+| **Reactive continuation** | "finish X" agent after a truncation | ~15–20M tokens per over-scoped phase | §6 |
+| **LLM-per-file codemod** | one agent invocation per identical edit | blows the turn budget | §6 |
+| **Doc drift** | documented hook that was never wired | silent loss of a quality gate | §5.13 |
+| **Session-wide effort** | one reasoning level for every role | thinking = 65% of all tokens | §5.1 |
+
+---
+
+## 10. Audit checklist
+
+Run after any burst of agent-file edits, and at minimum monthly.
+
+- [ ] Every agent has an explicit **reasoning effort** appropriate to its role (§5.1).
+- [ ] Every agent's **actual model** is verified — including any environment aliases (§8).
+- [ ] Every read-only reviewer genuinely **lacks edit tools** (§5.10).
+- [ ] The lead has **no edit or write tools** (§5.11).
+- [ ] Turn caps follow **one** of the two designs in §6 — and the required discipline is
+      written down, not assumed.
+- [ ] The **soft budget and partial-report protocol** appear in every writer's definition,
+      with "partial is a success" stated explicitly (§5.8).
+- [ ] Every agent runs the **Definition of Done itself**; no routine reviewer tail (§5.6).
+- [ ] **Flow diagrams agree with prose rules** — grep for the rule's keywords across the
+      whole file (§5.6).
+- [ ] The **file-ownership table** covers every ambiguous path, including name twins (§5.10).
+- [ ] Shared rules live **in one place**; agent definitions link rather than repeat (§5.12).
+- [ ] **No source file exceeds the cap**; nothing was split below one-concern size (§5.2).
+- [ ] Every documented **hook actually exists and is wired** in the configuration (§5.13).
+- [ ] Re-run the measurement script and compare against the last run (§2).
+
+---
+
+## 11. What is in this repo
+
+```
+README.md                            this document
+docs/measurements.md                 methodology, raw numbers, JSONL field reference
+templates/orchestrator.md            lead agent definition — routing, fan-out, partial handling
+templates/writer-agent.md            implementer definition — budget, discipline, DoD
+templates/reviewer-agent.md          read-only gate definition
+templates/shared-discipline.md       the block to paste into your project instruction file
+hooks/subagent-return-contract.py    stop-hook enforcing conclusion-only reports
+scripts/measure-agent-team.py        reproduce every number in this document
+```
+
+Start here:
+
+1. Run `scripts/measure-agent-team.py` against a session you have already completed. You
+   need your own baseline before changing anything.
+2. Apply §5.1 (per-role effort) and §5.2 (file size). These are the two biggest levers and
+   neither requires changing how you work.
+3. Re-measure with `--split-at` set to the moment you applied them.
+4. Then work down the checklist in §10.
+
+---
+
+## Scope and honesty statement
+
+- **Performance and quality numbers come from one team only** — a Rust terminal application,
+  76 subagent runs, one orchestrator, 17 agent roles. They are internally consistent and
+  reproducible from the transcripts, but they are one codebase, one task type, one model
+  family.
+- **The second team contributed design patterns, not measurements** — the ownership model,
+  the quality hooks, the pre-split scoping discipline and the warm-handoff protocol come
+  from a larger full-stack web platform whose session transcripts were not available on the
+  machine used for this analysis. Its own recorded observations (the ~10M + ~8M truncation
+  cost) are quoted as reported, not independently verified here.
+- Where those two sources disagree — most visibly on turn caps — this document presents both
+  as valid designs rather than picking a winner, because the evidence supports both.
+- Rules that failed are in §7. An earlier draft's misattribution is corrected in §5.4 and §7
+  rather than quietly deleted.
+
+All identifying details — accounts, hostnames, addresses, internal project names — have been
+removed. The engineering content is unchanged.
