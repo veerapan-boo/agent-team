@@ -626,6 +626,7 @@ Run after any burst of agent-file edits, and at minimum monthly.
 
 ```
 README.md                            this document
+LICENSE                              MIT -- copy, adapt and ship any of this
 docs/measurements.md                 methodology, raw numbers, JSONL field reference
 templates/orchestrator.md            lead agent definition — routing, fan-out, partial handling
 templates/writer-agent.md            implementer definition — budget, discipline, DoD
@@ -664,3 +665,13 @@ Start here:
 
 All identifying details — accounts, hostnames, addresses, internal project names — have been
 removed. The engineering content is unchanged.
+
+---
+
+## License
+
+[MIT](LICENSE). Take the templates, the hook and the measurement script and adapt them to
+your own team — attribution is appreciated but not required.
+
+If you measure your own team with `scripts/measure-agent-team.py`, the numbers you get are
+the ones that matter. Ours are a starting hypothesis, not a benchmark to match.
