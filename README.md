@@ -316,10 +316,19 @@ A brief that spans two screens plus configuration plus docs is three briefs. The
 single run measured took **159 API round trips and 42 minutes**. A brief you cannot state in
 three sentences is too big.
 
-### 5.6 Verification runs inside the agent that did the work
+### 5.6 Verify exactly once, with the shortest feedback loop you can afford
 
-Every code-writing agent runs the project's Definition of Done *before reporting* — not in a
-later pass:
+The rule that matters is **not** "reviewers are bad" and **not** "always self-verify". It is:
+
+> Every change is verified **once**, and the result reaches someone who can still act on it
+> cheaply.
+
+Both teams studied satisfy that sentence with opposite architectures, and both are coherent.
+Pick one deliberately; the expensive mistake is drifting between them.
+
+#### Design 1 — verification inside the writer
+
+Every code-writing agent runs the project's Definition of Done *before reporting*:
 
 ```bash
 <build>            # zero warnings
@@ -328,15 +337,50 @@ later pass:
 <check that frozen/untouchable paths are still clean>
 ```
 
-Then **do not spawn a routine reviewer.** A reviewer appended to every task is a duplicate
-build producing no new information. Spawn one only for an independent second opinion on
-security-sensitive work, auth/token paths, or a task whose own agent reported partial
-results.
+Then **do not add a routine reviewer.** Once writers verify themselves, a review agent
+appended to every task is a duplicate build producing no new information — measured cost in
+one team: about nine minutes per two development phases, zero findings. Spawn a reviewer only
+for an independent second opinion: security-sensitive work, auth or credential paths, or a
+task whose own agent reported partial results.
 
-There is a subtle failure here worth calling out: in the studied team the "no routine
-reviewer" rule was written in prose, but **five flow diagrams in the same file still said
-"spawn reviewer"** — and the diagrams won every time. *When a rule contradicts a diagram, the
-diagram wins.* Fix both or fix neither.
+- **Feedback loop:** immediate, inside the agent that still holds the context.
+- **Cost:** N builds per turn, one per writer.
+- **Fails when:** a writer skips its own checks. Nothing catches it.
+
+#### Design 2 — verification centralised in a read-only gate
+
+Writers do not run the build. Every code-changing turn ends with a **read-only reviewer**
+that builds, tests, and checks the domain invariants. A `FAIL` routes back to the owning
+writer with the evidence. Add a **fails-twice rule**: if the *same* finding fails twice, stop
+and re-plan with an architect rather than thrashing.
+
+- **Feedback loop:** end of turn, after the writer's context is gone.
+- **Cost:** one build per turn regardless of writer count, plus a **cold restart** whenever it
+  fails — the fix agent reloads the whole file context from scratch.
+- **Fails when:** the reviewer becomes a bottleneck, or a failure arrives so late that fixing
+  it costs more than the builds it saved.
+- **Requires:** a genuinely read-only reviewer (no edit tools) and a written failure loop.
+  Without the loop it is not a gate, it is a report nobody actions.
+
+#### Choosing
+
+| | Design 1 (self-verify) | Design 2 (central gate) |
+|---|---|---|
+| Best when | many small independent changes; cheap build | one expensive build; strong domain invariants a generalist writer cannot judge |
+| Marginal cost | N builds per turn | 1 build per turn |
+| Failure cost | low — caught in context | high — cold reload to fix |
+| Non-negotiable | writers actually run the commands | the reviewer holds **no** edit tool, and `FAIL` has a defined route back |
+
+A useful hybrid: writers run the **cheap** checks themselves (compile, lint, unit tests), and
+the central gate owns only what a writer genuinely cannot self-assess — domain correctness,
+design fidelity, security, load. That keeps the fast loop fast and reserves the expensive gate
+for judgement.
+
+#### Whichever you pick, make the documents agree
+
+In one studied team the "no routine reviewer" rule was written in prose while **five flow
+diagrams in the same file still said "spawn reviewer"** — and the diagrams won every time.
+*When a rule contradicts a diagram, the diagram wins.* Fix both or fix neither.
 
 ### 5.7 Reading and writing discipline
 
@@ -420,6 +464,38 @@ definitions link to it and add only what is genuinely role-specific.
 
 Expect a modest win. Measured saving from removing the duplication: **~300–560 tokens per
 spawn** — real, but an order of magnitude smaller than §5.1–5.3.
+
+#### "One place" means one place per *scope*, not one file for everything
+
+The rule above is about **team-wide** discipline — budgets, reading rules, the Definition of
+Done. Those apply to every agent, so they belong in the always-injected file.
+
+**Domain rules are different.** A rule about database migrations is noise in the context of an
+agent editing the UI. Pushing every domain convention into the one always-loaded file makes
+that file grow without bound, and every agent pays for every domain.
+
+The better shape is a rules directory whose entries are **scoped by file glob** and loaded
+only when the work touches matching paths:
+
+```
+.claude/
+├── CLAUDE.md          team-wide discipline -- always injected, kept short
+└── rules/
+    ├── <ui-conventions>.md     globs: <your UI source glob>
+    ├── <schema-changes>.md     globs: <your migrations glob>
+    ├── <endpoint-security>.md  globs: <your route handlers glob>
+    └── <one file per domain>
+```
+
+One team studied runs fifteen such files. The always-loaded instruction file stays focused on
+discipline, and an agent editing a schema migration never loads the UI conventions.
+
+Two failure modes to avoid when you split:
+
+- **Do not split the discipline rules themselves.** They are cross-cutting by definition;
+  scoping them means some agent will not receive them.
+- **A scoped rule that never matches is a broken reference** (§9.1). Verify each glob actually
+  hits files that exist, or the rule is decoration.
 
 ### 5.13 Treat documentation drift as a first-class failure
 
@@ -587,7 +663,9 @@ Each of these was observed and cost measurable time.
 | **Unverified "done"** | reports success without running the build | 3 rework agents, ~1.4 h total | §5.6 |
 | **Serial-by-habit** | spawning independent tasks one at a time | 20 min where 7 would do; 12 min where 6 would do | §5.3 |
 | **Mega-brief** | one task spanning several screens and configs | 159 round trips, 42 min | §5.5 |
-| **Routine reviewer tail** | a review agent appended to every task | ~9 min per two phases, zero new information | §5.6 |
+| **Routine reviewer tail** | a review agent appended to every task *that already self-verifies* | ~9 min per two phases, zero new information | §5.6 |
+| **Broken reference** | an agent definition names a mandatory skill, tool, script, or path that does not exist | verification silently never happens | §9.1 |
+| **Verification gap** | writers carry no build command *and* the named verify helper is missing | nothing is checked until the end-of-turn gate, if there is one | §5.6 |
 | **Diagram/prose contradiction** | rule says "don't", flow chart says "do" | rule silently ignored | §5.6 |
 | **Oversized file** | 2,248-line source file | read 85 times at ~28k tokens each | §5.2 |
 | **Over-splitting** | files cut below one-concern size | +8 s per extra tool call, no token saving | §5.2 |
@@ -596,6 +674,32 @@ Each of these was observed and cost measurable time.
 | **LLM-per-file codemod** | one agent invocation per identical edit | blows the turn budget | §6 |
 | **Doc drift** | documented hook that was never wired | silent loss of a quality gate | §5.13 |
 | **Session-wide effort** | one reasoning level for every role | thinking = 65% of all tokens | §5.1 |
+
+### 9.1 Broken references deserve their own paragraph
+
+This one is worth separating because it is invisible to every kind of review except running
+the check, and because it is the cheapest defect in the table to find.
+
+An agent definition instructs its agent to *"invoke the **verify** skill before declaring any
+non-trivial change done"*. The skill does not exist. Nothing errors at load time — agent
+definitions are prose, and prose does not resolve references. The agent reaches that line, has
+nothing to invoke, and moves on. Verification silently never happens, in every run, forever.
+
+Observed in a mature team that was otherwise passing most of this checklist: four separate
+writer definitions named the same non-existent helper, while six of seven writers carried no
+build or test command of their own.
+
+The class is broader than skills. Anything an agent definition names by identifier can rot:
+
+- a skill, plugin, or slash command that was renamed or never created,
+- a script path that moved,
+- a hook documented in the team file but never wired in the configuration (§5.13),
+- an agent named in the lead's routing table that no longer exists,
+- a make target, npm script, or test command that was renamed.
+
+**The check is mechanical.** Extract every identifier your agent definitions name as
+mandatory, and assert each one resolves. It takes seconds and it is the only defect here that
+a careful human reading the file cannot catch — the file reads perfectly.
 
 ---
 
@@ -611,7 +715,11 @@ Run after any burst of agent-file edits, and at minimum monthly.
       written down, not assumed.
 - [ ] The **soft budget and partial-report protocol** appear in every writer's definition,
       with "partial is a success" stated explicitly (§5.8).
-- [ ] Every agent runs the **Definition of Done itself**; no routine reviewer tail (§5.6).
+- [ ] Verification follows **one** of the two designs in §5.6, end to end — either every
+      writer runs the checks itself, or a read-only gate does with a written failure route.
+      Not half of each.
+- [ ] **Every identifier an agent definition names as mandatory resolves** — skills, scripts,
+      hooks, agent names, build targets (§9.1).
 - [ ] **Flow diagrams agree with prose rules** — grep for the rule's keywords across the
       whole file (§5.6).
 - [ ] The **file-ownership table** covers every ambiguous path, including name twins (§5.10).
@@ -619,6 +727,34 @@ Run after any burst of agent-file edits, and at minimum monthly.
 - [ ] **No source file exceeds the cap**; nothing was split below one-concern size (§5.2).
 - [ ] Every documented **hook actually exists and is wired** in the configuration (§5.13).
 - [ ] Re-run the measurement script and compare against the last run (§2).
+
+### Then audit the interactions, not just the boxes
+
+A ticked checklist is not a safe team. Each line above is judged in isolation, and the
+failures that actually hurt are **combinations of individually defensible choices**.
+
+A real example, from a team that passed 8 of these 13 lines:
+
+```
+low turn cap on writers          -- defensible: paired with a documented pre-split discipline
+verification centralised         -- defensible: one build per turn instead of N
+no partial-report protocol       -- defensible: the cap is meant to be avoided, not survived
+                    ↓  taken together
+a mis-scoped brief kills the agent mid-run, with no report, and the work it
+already wrote to disk was never verified by anything
+```
+
+No single line of the checklist is violated. The risk lives entirely in the seams.
+
+Ask these three questions after the boxes are ticked:
+
+1. **What happens when the discipline this design depends on is not followed?** Every design
+   here leans on one human or agent behaviour. Name it, then assume it fails once.
+2. **Does any single failure have two safety nets removed at the same time?** A low cap
+   removes "the agent finishes"; no partial protocol removes "the agent reports". Together
+   they remove the whole feedback path.
+3. **Where does a failure surface, and is the context that caused it still alive there?** The
+   further apart those two points are, the more expensive every defect becomes.
 
 ---
 
@@ -628,6 +764,7 @@ Run after any burst of agent-file edits, and at minimum monthly.
 README.md                            this document
 LICENSE                              MIT -- copy, adapt and ship any of this
 docs/measurements.md                 methodology, raw numbers, JSONL field reference
+docs/worked-audit.md                 the §10 checklist applied to a real team (scored 8/13)
 templates/orchestrator.md            lead agent definition — routing, fan-out, partial handling
 templates/writer-agent.md            implementer definition — budget, discipline, DoD
 templates/reviewer-agent.md          read-only gate definition
@@ -643,7 +780,8 @@ Start here:
 2. Apply §5.1 (per-role effort) and §5.2 (file size). These are the two biggest levers and
    neither requires changing how you work.
 3. Re-measure with `--split-at` set to the moment you applied them.
-4. Then work down the checklist in §10.
+4. Then work down the checklist in §10 — [`docs/worked-audit.md`](docs/worked-audit.md) shows
+   what that looks like on a team that was already good, and what it found anyway.
 
 ---
 
