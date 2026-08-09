@@ -13,33 +13,39 @@ that too.
 ## TL;DR — what changed when the rules below were applied
 
 One team, one codebase, same task type (porting a desktop app to a terminal UI), same
-models. **76 subagent runs** measured across the two eras.
+models. **104 subagent runs** measured across three eras.
 
-| Metric | Before rules | After rules | Change |
-|---|---:|---:|---|
-| **Wall clock per delivered agent** | 18.6 min | **5.9 min** | **−68%** |
-| **Slowest single agent** | 43.9 min | **11.5 min** | **−74%** |
-| Agents taking over 20 min | 7 of 47 (15%) | **0 of 29 (0%)** | eliminated |
-| Output tokens — median agent | 17,387 | 11,850 | −32% |
-| Output tokens — worst agent | 177,085 | 42,039 | −76% |
-| Tool calls — worst agent | 174 | 59 | −66% |
-| Conversation turns — p90 | 204 | 97 | −52% |
-| Context re-read per agent | 12.34 M tok | 3.86 M tok | −69% |
-| `Read` calls per agent | 18.2 | 9.4 | −48% |
-| Parallel factor (agents running at once) | 0.53× | 0.83× | +57% |
-| **Rework agents** (spawned only to fix a previous agent's output) | 7 of 47 (15%) | **0 of 29 (0%)** | eliminated |
+| Metric | A — no rules | B — rules written | C — rules loaded | A → C |
+|---|---:|---:|---:|---|
+| **Wall clock per delivered agent** | 18.6 min | 7.4 min | **2.8 min** | **6.6× faster** |
+| **Parallel factor** (agents running at once) | 0.53× | 0.68× | **1.51×** | first time above 1.0 |
+| Slowest single agent | 43.9 min | 13.9 min | **9.6 min** | −78% |
+| Agents taking over 20 min | 7 of 47 (15%) | 0 | **0** | eliminated |
+| Conversation turns — p90 | 204 | 100 | **89** | −56% |
+| Routine reviewer spawns | 3 | 4 | **1 of 20** | now selective |
+| Output tokens — worst agent | 177,085 | 42,039 | 52,138 | −71% |
+| Context re-read per agent | 12.34 M tok | 3.86 M tok | 3.87 M tok | −69% |
+| **Rework agents** (spawned only to fix a previous agent's output) | 7 of 47 (15%) | 0 | **0** | eliminated |
 
-Three honest caveats, stated up front:
+**Why B and C differ matters more than the numbers.** Era B is *after the rules were written
+to disk*; era C is after the session was **restarted**. Agent definitions and hook
+configuration are read at process start and **do not hot-reload** — a rule edited mid-session
+has no effect at all. Era B proves it: the "no routine reviewer" rule was already in the file,
+and the running session spawned four anyway.
 
-1. **Median duration barely moved** (4.0 → 4.4 min) while the *maximum* collapsed. The rules
-   did not make a typical agent faster — they removed the catastrophic tail. That tail was
-   where the hours went.
-2. The two eras delivered different feature phases of the same port. Scope is comparable
-   (2–3 phases each) but not identical, so treat per-agent metrics as solid and
-   whole-session totals as indicative.
-3. These figures are a snapshot of a session that was still running when they were taken.
-   Re-running the measurement script will give slightly different totals and identical
-   conclusions.
+Four honest caveats, stated up front:
+
+1. **Median duration barely moved** across every era (4.0 → 4.4 → 4.2 min) while the
+   *maximum* collapsed. The rules did not make a typical agent faster — they removed the
+   catastrophic tail and let agents overlap. That tail was where the hours went.
+2. **Era C's work was more parallelisable by nature** — a scaffold plus seven independent
+   screens, versus era A's sequential login and setup flows. Some of the 1.51× is task shape,
+   not rules. The evidence that it is *not only* shape: the lead ran the foundation task
+   alone, then four leaves concurrently, then three more — the exact pattern §5.3 prescribes.
+3. The three eras delivered different feature phases of the same port, so per-agent metrics
+   are solid and whole-session totals are indicative.
+4. These figures are a snapshot of a session that was still running. Re-running the
+   measurement script gives slightly different totals and identical conclusions.
 
 ---
 
@@ -50,7 +56,7 @@ Three honest caveats, stated up front:
 - [3. Performance results in full](#3-performance-results-in-full)
 - [4. Quality results](#4-quality-results)
 - [5. The principles](#5-the-principles)
-- [6. Turn caps: two valid designs, one fatal mistake](#6-turn-caps-two-valid-designs-one-fatal-mistake)
+- [6. Runtime mechanics that silently eat finished work](#6-runtime-mechanics-that-silently-eat-finished-work)
 - [7. Rules that did *not* work](#7-rules-that-did-not-work)
 - [8. Team topology](#8-team-topology)
 - [9. Anti-pattern catalogue](#9-anti-pattern-catalogue)
@@ -68,8 +74,9 @@ Splitting every subagent's timeline into *waiting for the model to produce token
 
 | | Generating tokens | Running tools | Generation rate |
 |---|---:|---:|---:|
-| Before rules | **80%** of agent time | 20% | 104 tok/s |
-| After rules | 67% | 33% | 113 tok/s |
+| Era A — no rules | **80%** of agent time | 20% | 104 tok/s |
+| Era B — rules written | 67% | 33% | 113 tok/s |
+| Era C — rules loaded | 69% | 31% | 152 tok/s |
 
 **The build is not your bottleneck. The model talking to itself is.**
 
@@ -138,38 +145,41 @@ Full methodology, including the exact JSONL fields: [`docs/measurements.md`](doc
 ## 3. Performance results in full
 
 **Era A — no discipline rules.** 47 subagents, 14.53 h wall clock.
-**Era B — discipline rules applied.** 29 subagents, 2.84 h wall clock.
+**Era B — rules written to disk, session not restarted.** 37 subagents, 4.54 h.
+**Era C — session restarted, rules actually loaded.** 20 subagents, 0.92 h.
 
-| | Era A | Era B |
-|---|---:|---:|
-| Agents | 47 | 29 |
-| Wall clock | 14.53 h | 2.84 h |
-| Sum of agent runtimes | 7.65 h | 2.35 h |
-| Parallel factor (sum ÷ wall) | 0.53× | 0.83× |
-| Wall clock per agent | 18.6 min | 5.9 min |
-| Duration — median | 4.0 min | 4.4 min |
-| Duration — max | 43.9 min | 11.5 min |
-| Agents > 20 min | 7 (15%) | 0 (0%) |
-| Output tokens — median | 17,387 | 11,850 |
-| Output tokens — max | 177,085 | 42,039 |
-| Output tokens — total | 1,707,042 | 455,245 |
-| Tool calls — median | 39 | 33 |
-| Tool calls — max | 174 | 59 |
-| Turns — median / p90 / max | 68 / 204 / 307 | 56 / 97 / 118 |
-| Cache read per agent | 12.34 M | 3.86 M |
-| Startup context per agent (median) | 27,361 | 37,337 |
-| `Read` calls per agent | 18.2 | 9.4 |
-| Distinct files read per agent (median) | 8 | 5 |
-| Partial reads (`offset`/`limit`) | 49% | 53% |
-| Output tokens per tool call | 756 | 520 |
+| | Era A | Era B | Era C |
+|---|---:|---:|---:|
+| Agents | 47 | 37 | 20 |
+| Wall clock | 14.53 h | 4.54 h | 0.92 h |
+| Parallel factor (sum ÷ wall) | 0.53× | 0.68× | **1.51×** |
+| Wall clock per agent | 18.6 min | 7.4 min | **2.8 min** |
+| Duration — median | 4.0 min | 4.4 min | 4.2 min |
+| Duration — max | 43.9 min | 13.9 min | 9.6 min |
+| Agents > 20 min | 7 (15%) | 0 (0%) | 0 (0%) |
+| Output tokens — median | 17,387 | 11,850 | 12,433 |
+| Output tokens — max | 177,085 | 42,039 | 52,138 |
+| Tool calls — median / max | 39 / 174 | 33 / 59 | 31 / 66 |
+| Turns — median / p90 / max | 68 / 204 / 307 | 56 / 100 / 118 | 51 / 89 / 109 |
+| Cache read per agent | 12.34 M | 3.86 M | 3.87 M |
+| Startup context per agent (median) | 27,361 | 37,337 | 37,851 |
+| `Read` calls per agent | 18.2 | 9.4 | 10.3 |
+| Partial reads (`offset`/`limit`) | 49% | 53% | 49% |
+| Output tokens per tool call | 756 | 520 | 597 |
+| Routine reviewer spawns | 3 | 4 | 1 |
 
-The row that explains the biggest win: **turns at p90 fell from 204 to 97.** The typical
-agent was never the problem. The problem was a long tail of agents that ran for hundreds of
-turns, re-reading a growing context on every one of them.
+Three rows carry the story.
 
-The row that shows the remaining work: **parallel factor 0.82×.** A value below 1.0 means
-that most of the time, exactly one agent was running. Fan-out is still the largest
-unexploited lever in both teams studied.
+**Turns at p90 fell from 204 to 89.** The typical agent was never the problem; a long tail of
+agents ran for hundreds of turns, re-reading a growing context on every one.
+
+**Parallel factor crossed 1.0.** Below 1.0 means idle gaps dominate — mostly one agent running
+at a time. Era C is the first measurement where agents genuinely overlap, and it is the single
+largest contributor to the drop in wall clock per agent.
+
+**Era B changed almost nothing structural.** The rules existed on disk for all of era B and
+the running session could not see them. This is the most transferable finding in the table:
+*writing the rule is not deploying the rule.*
 
 ---
 
@@ -250,7 +260,7 @@ people. Three measured facts explain why:
   measured price of one tool call. Splitting one concept across three files bills that price
   twice more for every agent that needs the concept.
 - **The number of files an agent touches is set by brief scoping, not by file size.** It fell
-  from a median of 8 to 5 across the two eras — during which the *code got split into more,
+  from a median of 8 to 5 between eras A and B — during which the *code got split into more,
   smaller files*, which should have pushed it up. What actually moved it was tighter briefs
   (§5.5). Slicing code finer does not reduce what an agent must understand; it fragments the
   same understanding across more round trips.
@@ -289,6 +299,30 @@ whole screens because of a single shared line.
 
 Hard constraint: **never fan out two agents that will edit the same file.** Concurrent edits
 to one file lose work.
+
+#### What it looks like when it works
+
+The same team, one phase after this rule was actually loaded. Times are spawn → finish:
+
+```
+20:23:40 ─ 20:25:25   T0  scaffold                    ← foundation, alone, waited for
+20:26:02 ─ 20:33:07   T1  ops/k8s            ┐
+20:26:24 ─ 20:33:04   T2  ops/aws_batch      │ four leaves, one message
+20:26:42 ─ 20:33:01   T3  ops/batch_report   │ 7 minutes wall, not 28
+20:26:58 ─ 20:32:36   T4  confirm widget     ┘
+20:33:33 ─ 20:35:21   verify wave 1                   ← one reviewer, for the wave, not per task
+20:36:03 ─ 20:40:17   T5  screen A           ┐
+20:36:22 ─ 20:40:35   T6  screen B           │ three leaves, one message
+20:36:39 ─ 20:40:06   T7  screen C           ┘
+```
+
+Twenty agents, 55 minutes of wall clock, parallel factor 1.51×. The shape is the whole rule:
+**one foundation, then waves of leaves, with verification per wave rather than per task.**
+
+Two details worth copying. The four leaves finish within 31 seconds of each other — that is
+what correctly-sized sibling briefs look like, and it is a good signal that the split followed
+real seams. And the single reviewer covers the whole wave: fan-out does not mean fanning out
+the checking too.
 
 ### 5.4 Write briefs that remove exploration
 
@@ -517,7 +551,13 @@ that changes. Defend against it mechanically:
 
 ---
 
-## 6. Turn caps: two valid designs, one fatal mistake
+## 6. Runtime mechanics that silently eat finished work
+
+These three share a signature: **something works exactly as specified, and it changes
+nothing.** No error, no failed build, nothing in a log. They are the most expensive defects in
+this document, because the cost is paid in full and the result is discarded.
+
+### 6.1 Turn caps: two valid designs, one fatal mistake
 
 Both teams studied cap how long a subagent may run. They chose **opposite** values, and both
 are defensible — because the cap is not a standalone knob. It is half of a system.
@@ -585,6 +625,109 @@ disappearances.**
 measured team as it actually behaved would have killed **64% of its agents with no report**.
 If you set a low cap, you must own the scoping. If you cannot guarantee the scoping, set the
 cap high and invest in partial reporting instead.
+
+### 6.2 Spawn mechanics: the report that never arrives
+
+Some runtimes offer two ways to run the *same* agent definition, and they differ in one
+respect that decides whether you ever see the result.
+
+| | **Subagent** | **Teammate / persistent agent** |
+|---|---|---|
+| Analogy | a blocking function call | starting a worker you must collect from |
+| On completion | its report **returns automatically** as the tool result | it goes **idle**; nothing is pushed to you |
+| Its context | discarded when it finishes | **stays alive** — you can ask follow-up questions |
+| If the lead forgets it | impossible | the work sits finished and uncollected, silently |
+
+The trap is not that one is worse. It is that **the choice is often made by accident.** In
+Claude Code the mechanism is selected by whether the spawn passes a `name:` argument, under a
+feature flag. Measured across 84 spawns in one session, the correlation was exact:
+
+```
+teammate + has name    12        subagent + has name     0
+teammate + no name      0        subagent + no name     72
+```
+
+The lead was passing `name:` for a nicer label in the task list — and silently changing how
+the result comes back. 86% of the time the familiar mechanism applied and the report arrived
+on its own, which is precisely what makes the other 14% so hard to notice.
+
+**What it cost:** two agents (a scout and an architect) finished successfully with complete
+reports of 9,066 and 66,498 characters sitting ready. They went idle. The lead read "idle" as
+"still working", kept waiting, filled the time re-reading files the architect had already
+mapped, and **produced nothing for 23 minutes** until a human asked why it was quiet.
+
+#### The rules that fix it
+
+1. **Default to the auto-reporting mechanism.** Do not opt into a persistent agent for a
+   cosmetic reason. If your runtime keys this off an argument, say so explicitly in the lead's
+   instructions — the lead cannot infer it.
+2. **`idle` *is* the completion signal.** There is no fuller report arriving later. Waiting
+   for one blocks forever.
+3. **Collect in the same turn.** On the idle or completion signal, pull the report
+   immediately, then keep executing the plan. Never end a turn with "waiting for the report"
+   — an ended turn with nothing scheduled may never wake again.
+4. **Have a fallback that does not need the tool.** If the collection tool is unavailable or
+   returns nothing, verify the world directly: version-control status shows what a writer
+   changed, and the agent's own transcript on disk holds its final report as the last
+   assistant message. A missing tool is never a reason to stop.
+5. **Make the report a completeness check.** Require the lead to list every agent it spawned
+   this turn, with each one's verification result. An agent missing from that list was never
+   collected — and the lead notices while it can still act.
+
+#### When a persistent agent is the right call
+
+Two cases, both about **not absorbing a large result**:
+
+- **The output is too big to hold.** A blueprint can run to tens of thousands of tokens. As a
+  subagent it dumps all of that into the lead's context permanently — the 66,498-character
+  report above cost roughly 17k tokens of the lead's context for the rest of the session. As
+  a persistent agent, the blueprint stays in *its* context and the lead asks for one brief at
+  a time, getting back a few hundred tokens each.
+- **You will ask several follow-up questions**, e.g. a scout you expect to query repeatedly as
+  the plan develops.
+
+#### The simpler alternative: write the big result to a file
+
+If you do not want the extra collection step, have the planning agent **write its blueprint
+to a file** and return only a pointer plus the per-brief file lists. Then:
+
+- the lead's context carries a path, not a document,
+- each writer reads only the section covering its own brief,
+- the blueprint outlives the session, and survives a restart.
+
+The team measured here converged on this independently once the problem was visible — its
+lead began routinely spawning a cheap scout to *extract the blueprint to a file* before
+delegating. That is the lowest-ceremony fix, and it composes with either spawn mechanism.
+
+### 6.3 Configuration does not hot-reload — writing the rule is not deploying it
+
+This one produced an entire era of measurement in which careful work changed nothing.
+
+Agent definitions and hook configuration are read **when the session process starts**. Editing
+them while a session is running has no effect on that session — the rules sit on disk,
+correct and inert, while the running lead continues from the copy it loaded at startup.
+
+The evidence is unambiguous. A "do not spawn a reviewer routinely" rule was written into the
+lead's definition, and over the following 17 spawns the same session spawned a reviewer
+**twice** anyway. Nothing was broken; the rule simply was not loaded.
+
+That accounts for the whole gap between eras B and C in §3. Same rules, same team, same
+codebase — the only difference is that era C's session was restarted, and wall clock per agent
+fell from 7.4 to 2.8 minutes.
+
+**Three consequences worth internalising:**
+
+- **Compacting or summarising a conversation is not a restart.** It reduces context inside the
+  same process; the configuration loaded at startup is untouched. Only exiting and relaunching
+  reloads it.
+- **A "resume" of an old session does reload**, because it starts a fresh process — but you
+  inherit that session's history, so decide whether you want the context or a clean start.
+- **Measure only after a restart.** A before/after comparison that spans an un-restarted edit
+  measures nothing, and will make a good rule look useless.
+
+Add it to the loop: change the definition → **restart** → re-measure. If you cannot restart
+immediately, note in your report that the change is *written but not deployed* — those are
+different states, and conflating them wastes the next measurement too.
 
 ---
 
@@ -669,7 +812,10 @@ Each of these was observed and cost measurable time.
 | **Diagram/prose contradiction** | rule says "don't", flow chart says "do" | rule silently ignored | §5.6 |
 | **Oversized file** | 2,248-line source file | read 85 times at ~28k tokens each | §5.2 |
 | **Over-splitting** | files cut below one-concern size | +8 s per extra tool call, no token saving | §5.2 |
-| **Cap without scoping** | low turn limit, unbounded task size | would kill 65% of runs, no report | §6 |
+| **Cap without scoping** | low turn limit, unbounded task size | would kill 64% of runs, no report | §6.1 |
+| **Uncollected agent** | a persistent agent goes idle and the lead reads idle as "still working" | 23 min stalled with two finished reports on disk | §6.2 |
+| **Accidental mechanism** | passing a `name:` for a nicer label silently switches how the result comes back | the failure above, and it looks like nothing | §6.2 |
+| **Rule written, not deployed** | editing an agent definition mid-session and assuming it applies | a whole era of measurement with zero structural change | §6.3 |
 | **Reactive continuation** | "finish X" agent after a truncation | ~15–20M tokens per over-scoped phase | §6 |
 | **LLM-per-file codemod** | one agent invocation per identical edit | blows the turn budget | §6 |
 | **Doc drift** | documented hook that was never wired | silent loss of a quality gate | §5.13 |
@@ -711,8 +857,13 @@ Run after any burst of agent-file edits, and at minimum monthly.
 - [ ] Every agent's **actual model** is verified — including any environment aliases (§8).
 - [ ] Every read-only reviewer genuinely **lacks edit tools** (§5.10).
 - [ ] The lead has **no edit or write tools** (§5.11).
-- [ ] Turn caps follow **one** of the two designs in §6 — and the required discipline is
+- [ ] Turn caps follow **one** of the two designs in §6.1 — and the required discipline is
       written down, not assumed.
+- [ ] The lead's instructions name **which spawn mechanism it gets and how to collect** from
+      it, including what an idle signal means (§6.2).
+- [ ] Every agent you spawned this turn appears in the turn's report with its verification
+      result — the completeness check that catches an uncollected agent (§6.2).
+- [ ] The session was **restarted** after the last agent-definition or hook change (§6.3).
 - [ ] The **soft budget and partial-report protocol** appear in every writer's definition,
       with "partial is a success" stated explicitly (§5.8).
 - [ ] Verification follows **one** of the two designs in §5.6, end to end — either every
@@ -788,7 +939,7 @@ Start here:
 ## Scope and honesty statement
 
 - **Performance and quality numbers come from one team only** — a Rust terminal application,
-  76 subagent runs, one orchestrator, 17 agent roles. They are internally consistent and
+  104 subagent runs, one orchestrator, 17 agent roles. They are internally consistent and
   reproducible from the transcripts, but they are one codebase, one task type, one model
   family.
 - **The second team contributed design patterns, not measurements** — the ownership model,

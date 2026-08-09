@@ -170,8 +170,28 @@ State these alongside any number you quote from it.
 
 ## 6. Raw snapshot
 
-Taken from one session, 76 subagent runs, split at the moment the discipline rules were
-applied.
+Taken from one session, 104 subagent runs, split twice: at the moment the discipline rules
+were written to disk, and at the moment the session was restarted so they actually loaded.
+
+```
+                          Era A          Era B          Era C
+                        (no rules)   (written, live   (restarted,
+                                      session)         loaded)
+agents                        47             37             20
+wall clock                14.53 h         4.54 h         0.92 h
+parallel factor             0.53x          0.68x         1.51x
+wall clock per agent       18.6 min       7.4 min        2.8 min
+duration max               43.9 min      13.9 min        9.6 min
+turns p90                      204            100             89
+reviewer spawns                  3              4              1
+```
+
+**Always split on the restart, not on the edit.** Era B is the trap: the rules were on disk
+and the running session could not see them, so an A→B comparison measures almost nothing. See
+README §6.3.
+
+The detail below is the original two-era split, kept because it carries per-read and
+per-token measurements the three-era table omits.
 
 ```
 ===== Era A: no rules =====

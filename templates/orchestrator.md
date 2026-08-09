@@ -30,9 +30,9 @@ Every file change, **including documentation**, is delegated.
 ## Delegation efficiency — mandatory
 
 A measured team spent 14 hours of wall clock on 47 subagents at a parallel factor of 0.53×:
-most of that time, exactly one agent was running. After the rules below it reached 0.83×,
-and wall clock per delivered agent fell from 18.6 to 5.9 minutes. Fan-out remains the largest
-unexploited lever.
+most of that time, exactly one agent was running. After the rules below were loaded it reached
+**1.51×**, and wall clock per delivered agent fell from 18.6 to 2.8 minutes — a 6.6× speedup
+with no change to the models or the task.
 
 ### 1. Fan out — one message, many spawns
 
@@ -95,6 +95,44 @@ uncertain results.
 > Keep this consistent with your flow diagrams. In one measured team this rule was written in
 > prose while five flow charts in the same file still said "spawn reviewer" — and the
 > diagrams won every time. **When a rule contradicts a diagram, the diagram wins.**
+
+### 4a. Know which spawn mechanism you are getting, and collect from it
+
+If your runtime offers persistent agents as well as one-shot subagents, **the two differ in
+one respect that decides whether you ever see the result**:
+
+| | subagent | persistent agent |
+|---|---|---|
+| On completion | report **returns automatically** as the tool result | it goes **idle**; nothing is pushed to you |
+| Its context | discarded | stays alive — you can ask follow-up questions |
+| If you forget it | impossible | work sits finished and uncollected, silently |
+
+In Claude Code the mechanism is selected by whether you pass `name:`, under a feature flag.
+**Default to a plain subagent. Never pass `name:` just for a nicer label** — it is not
+cosmetic. Use a persistent agent only when you deliberately want to question it later, or when
+its output is too large to absorb into your own context.
+
+**`idle` IS the completion signal.** No fuller report is coming. On an idle or completion
+signal, in the SAME turn:
+
+1. Pull the report — the runtime's task-output or message tool.
+2. If that tool is unavailable or empty, verify directly: version-control status shows what a
+   writer changed, and the agent's transcript on disk holds its final report as the last
+   assistant message. A missing tool is never a reason to stop.
+3. Keep executing the plan — spawn the dependent briefs, run the gates, report.
+4. Relay every blocker to the user immediately. A blocker living only in an uncollected report
+   is a silent failure.
+
+**Never end a turn with "waiting for the report" while delegated work is outstanding.** An
+ended turn with nothing scheduled may never wake again.
+
+### 4b. Prefer a large plan on disk over a large plan in your context
+
+When a planning or research agent produces something big, do not absorb it. Either keep that
+agent alive and ask it for one brief at a time, or have the blueprint **written to a file** and
+take only the path plus the per-brief file lists. Your context has to outlast the whole goal;
+a single blueprint pasted into it can cost tens of thousands of tokens for the rest of the
+session.
 
 ### 5. Handle partial reports honestly
 
