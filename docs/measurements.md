@@ -98,6 +98,31 @@ Then drop any gap longer than ~10 minutes. Without that filter, a human reading 
 between phases is recorded as model latency; in the measured session two such pauses were
 10.8 and 14.6 minutes.
 
+### 2.4 Count turns by distinct `message.id`, not by transcript line
+
+Added 2026-08-11, after this defect shipped in the first published version of these numbers.
+
+A transcript writes **one line per content block**: a thinking block on one line, the
+tool_use block on the next, both carrying the same `message.id`. Counting assistant-typed
+lines therefore counts blocks, not turns. Measured on the primary session: 9,686 assistant
+lines vs 4,477 distinct message ids — a 2.16× inflation, which turned a real "one agent in
+five would exceed a 50-turn cap" into a published "64%".
+
+```python
+turn_ids = set()
+for event in assistant_events:
+    mid = event["message"].get("id")
+    if mid:
+        turn_ids.add(mid)          # one id = one API response = one turn
+turns = len(turn_ids)
+```
+
+Tool calls are *not* affected — tool_use blocks are never duplicated across lines (verified:
+5,292 blocks, zero duplicates). Two residual caveats: `maxTurns` counts tool-use turns only,
+so this figure over-counts it by roughly one (the final report message carries no tool call);
+and every turn number in this repository was recomputed with this correction on the completed
+session, while the other rows of the §6 snapshot keep their original mid-session values.
+
 ---
 
 ## 3. Derived quantities
@@ -110,7 +135,7 @@ between phases is recorded as model latency; in the measured session two such pa
 | **Parallel factor** | sum of runtimes ÷ wall clock. `< 1.0` means idle gaps dominate — mostly one agent at a time. `> 1.0` means genuine overlap |
 | **Wall clock per agent** | wall clock ÷ agent count — the honest "how long does one delegated task cost me" figure, because it includes the lead's own thinking between spawns |
 | **Startup context** | `input + cache_read + cache_creation` on the agent's **first** assistant message — what it was handed before doing anything |
-| **Turns** | count of assistant messages. This is what a `maxTurns` cap counts |
+| **Turns** | distinct assistant `message.id` values (plus any lines without an id). One id = one API response. Counting *lines* instead inflates this ~2× — see §2.4. `maxTurns` counts tool-use turns, so this over-counts it by roughly one (the final report) |
 | **Output tokens per tool call** | Σ output tokens ÷ Σ tool calls — the marginal price of one more round trip |
 | **Rework agent** | an agent whose task description matches `fix\|repair\|correct\|redo\|re-?run\|resolve\|follow.?up` — a proxy, see §5 |
 
@@ -182,7 +207,7 @@ wall clock                14.53 h         4.54 h         0.92 h
 parallel factor             0.53x          0.68x         1.51x
 wall clock per agent       18.6 min       7.4 min        2.8 min
 duration max               43.9 min      13.9 min        9.6 min
-turns p90                      204            100             89
+turns p90                       99             46             46
 reviewer spawns                  3              4              1
 ```
 
@@ -205,7 +230,7 @@ per-token measurements the three-era table omits.
   output tokens med / max    17,387 / 177,085
   output tokens total        1,707,042
   tool calls med / max       39 / 174
-  turns med / p90 / max      68 / 204 / 307
+  turns med / p90 / max      28 / 99 / 167
   cache read per agent       12.34 M
   startup context median     27,361 tok
   Read calls per agent       18.2
@@ -215,7 +240,7 @@ per-token measurements the three-era table omits.
   time generating tokens     80%   (4.54 h)
   time running tools         20%   (1.12 h)
   generation rate            104 output tok/s
-  would exceed maxTurns=50   30/47  (64%)
+  would exceed maxTurns=50   14/47  (30%)
 
 ===== Era B: with rules =====
   agents                     29
@@ -228,7 +253,7 @@ per-token measurements the three-era table omits.
   output tokens med / max    11,850 / 42,039
   output tokens total        455,245
   tool calls med / max       33 / 59
-  turns med / p90 / max      56 / 97 / 118
+  turns med / p90 / max      25 / 46 / 57
   cache read per agent       3.86 M
   startup context median     37,337 tok
   Read calls per agent       9.4
@@ -238,14 +263,15 @@ per-token measurements the three-era table omits.
   time generating tokens     67%   (1.12 h)
   time running tools         33%   (0.55 h)
   generation rate            113 output tok/s
-  would exceed maxTurns=50   19/29  (66%)
+  would exceed maxTurns=50   1/29  (3%)
 ```
 
-Turn distribution across both eras, used for the turn-cap analysis:
+Turn distribution across both eras, used for the turn-cap analysis (writers = implementer
+and doc-writer agent types; read-only = the rest):
 
 ```
 population   n     median   p90    max    >50 turns   >100   >200
-ALL          76      60     142    307      64.5%     25.0%   6.6%
-writers      54      67     157    307      61.1%     25.9%   9.3%
-read-only    21      58     113    166      76.2%     23.8%   0.0%
+ALL          76      28      64    167      19.7%      5.3%   0.0%
+writers      53      29      74    167      22.6%      7.5%   0.0%
+read-only    23      21      53     71      13.0%      0.0%   0.0%
 ```

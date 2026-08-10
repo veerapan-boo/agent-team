@@ -49,7 +49,8 @@ Two designs are valid; make sure your team picked one deliberately:
   reporting. This is the default in this template.
 - **Low cap (`maxTurns: 50`)** — only safe when the lead pre-splits every brief by file count
   (≤4–5 files per spawn) and hands off warm. Without that discipline, measurement across 76
-  real runs says a 50-turn cap kills **64% of agents with no report**.
+  real runs says a 50-turn cap kills **one agent in five with no report** — one in three on
+  the pre-discipline baseline.
 
 Never let the cap be the thing that stops you.
 

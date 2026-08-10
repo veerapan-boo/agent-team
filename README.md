@@ -21,7 +21,7 @@ models. **104 subagent runs** measured across three eras.
 | **Parallel factor** (agents running at once) | 0.53× | 0.68× | **1.51×** | first time above 1.0 |
 | Slowest single agent | 43.9 min | 13.9 min | **9.6 min** | −78% |
 | Agents taking over 20 min | 7 of 47 (15%) | 0 | **0** | eliminated |
-| Conversation turns — p90 | 204 | 100 | **89** | −56% |
+| Conversation turns — p90 | 99 | 46 | **46** | −54% |
 | Routine reviewer spawns | 3 | 4 | **1 of 20** | now selective |
 | Output tokens — worst agent | 177,085 | 42,039 | 52,138 | −71% |
 | Context re-read per agent | 12.34 M tok | 3.86 M tok | 3.87 M tok | −69% |
@@ -252,7 +252,7 @@ Full methodology, including the exact JSONL fields: [`docs/measurements.md`](doc
 | Output tokens — median | 17,387 | 11,850 | 12,433 |
 | Output tokens — max | 177,085 | 42,039 | 52,138 |
 | Tool calls — median / max | 39 / 174 | 33 / 59 | 31 / 66 |
-| Turns — median / p90 / max | 68 / 204 / 307 | 56 / 100 / 118 | 51 / 89 / 109 |
+| Turns — median / p90 / max | 28 / 99 / 167 | 24 / 46 / 57 | 20 / 46 / 54 |
 | Cache read per agent | 12.34 M | 3.86 M | 3.87 M |
 | Startup context per agent (median) | 27,361 | 37,337 | 37,851 |
 | `Read` calls per agent | 18.2 | 9.4 | 10.3 |
@@ -262,8 +262,8 @@ Full methodology, including the exact JSONL fields: [`docs/measurements.md`](doc
 
 Three rows carry the story.
 
-**Turns at p90 fell from 204 to 89.** The typical agent was never the problem; a long tail of
-agents ran for hundreds of turns, re-reading a growing context on every one.
+**Turns at p90 fell from 99 to 46.** The typical agent was never the problem; a long tail of
+agents ran past a hundred real turns (max 167), re-reading a growing context on every one.
 
 **Parallel factor crossed 1.0.** Below 1.0 means idle gaps dominate — mostly one agent running
 at a time. Era C is the first measurement where agents genuinely overlap, and it is the single
@@ -363,6 +363,11 @@ adds two round trips for every agent that needs the whole concept and saves noth
 
 Split along a seam that already exists (state / rendering / parsing / IO). **If no seam
 exists, the file has a design problem — say so instead of cutting it arbitrarily.**
+
+One deliberate deviation, recorded as §5.13 requires: this README itself is far over the
+documentation cap. The caps govern files agents load *while working*; this document is a
+reference for humans and is never injected into an agent's context. The moment you paste
+parts of it into a project instruction file, the caps apply to that file.
 
 ### 5.3 Fan out: one message, many spawns
 
@@ -741,16 +746,19 @@ First, the mistake. A hard turn cap does not ask the agent to wrap up. It **abor
 mid-sentence, and the human gets no report at all** — the work done so far is orphaned on
 disk with nothing describing it.
 
-Now the measured turn distribution, across 76 real subagent runs:
+Now the measured turn distribution, across 76 real subagent runs. A turn here is one API
+response, de-duplicated by `message.id` — see the counting correction in
+[`docs/measurements.md`](docs/measurements.md) §2.4:
 
 | Population | Median turns | p90 | Max | Would exceed a cap of 50 |
 |---|---:|---:|---:|---:|
-| All agents | 60 | 142 | 307 | **64%** |
-| Writers (implementers, doc writers) | 67 | 157 | 307 | 61% |
-| Read-only (scouts, reviewers, architects) | 58 | 113 | 166 | 76% |
+| All agents | 28 | 64 | 167 | **20%** |
+| Writers (implementers, doc writers) | 29 | 74 | 167 | 23% |
+| Read-only (scouts, reviewers, architects) | 21 | 53 | 71 | 13% |
 
-Note that this holds *after* the discipline rules: even in the improved era, 66% of agents
-still ran past 50 turns. Shorter agents are not the same thing as few-turn agents.
+The discipline rules move this number a lot: 30% of the undisciplined baseline's agents ran
+past 50 turns, versus 3–5% in the disciplined eras. Note who the cap kills, though — exactly
+the long, over-scoped runs, which are the most expensive work to lose without a report.
 
 ### Design 1 — low cap plus a pre-split scoping discipline
 
@@ -784,7 +792,7 @@ Set the hard cap as a **runaway backstop only** — comfortably above the worst 
 observed (measured worst: 167 turns → cap set at 200) — and control length with the soft
 budget and `PARTIAL:` protocol from §5.8.
 
-Result in the measured era: **maximum 118 turns, zero agents killed, zero silent
+Result in the measured era: **maximum 57 turns, zero agents killed, zero silent
 disappearances.**
 
 ### Choosing
@@ -797,7 +805,8 @@ disappearances.**
 | Cost of failure | high (orphaned work, cold restart) | moderate (one slow agent) |
 
 **The fatal mistake is a low cap with neither discipline.** Applying a 50-turn cap to the
-measured team as it actually behaved would have killed **64% of its agents with no report**.
+measured team as it actually behaved would have killed **one agent in five with no report** —
+one in three during the undisciplined baseline.
 If you set a low cap, you must own the scoping. If you cannot guarantee the scoping, set the
 cap high and invest in partial reporting instead.
 
@@ -973,7 +982,7 @@ Each of these was observed and cost measurable time.
 | **Diagram/prose contradiction** | rule says "don't", flow chart says "do" | rule silently ignored | §5.6 |
 | **Oversized file** | 2,248-line source file | read 85 times at ~28k tokens each | §5.2 |
 | **Over-splitting** | files cut below one-concern size | +8 s per extra tool call, no token saving | §5.2 |
-| **Cap without scoping** | low turn limit, unbounded task size | would kill 64% of runs, no report | §6.1 |
+| **Cap without scoping** | low turn limit, unbounded task size | would kill 1 in 5 runs (1 in 3 pre-discipline), no report | §6.1 |
 | **Uncollected agent** | a persistent agent goes idle and the lead reads idle as "still working" | 23 min stalled with two finished reports on disk | §6.2 |
 | **Accidental mechanism** | passing a `name:` for a nicer label silently switches how the result comes back | the failure above, and it looks like nothing | §6.2 |
 | **Rule written, not deployed** | editing an agent definition mid-session and assuming it applies | a whole era of measurement with zero structural change | §6.3 |
@@ -1060,7 +1069,8 @@ Run after any burst of agent-file edits, and at minimum monthly.
 A ticked checklist is not a safe team. Each line above is judged in isolation, and the
 failures that actually hurt are **combinations of individually defensible choices**.
 
-A real example, from a team that passed 8 of these 13 lines:
+A real example, from a team that passed 8 of the 13 lines this checklist had at the time
+(it has since grown to 22):
 
 ```
 low turn cap on writers          -- defensible: paired with a documented pre-split discipline
@@ -1091,13 +1101,16 @@ Ask these three questions after the boxes are ticked:
 README.md                            this document
 LICENSE                              MIT -- copy, adapt and ship any of this
 docs/measurements.md                 methodology, raw numbers, JSONL field reference
-docs/worked-audit.md                 the §10 checklist applied to a real team (scored 8/13)
+docs/worked-audit.md                 the §10 checklist applied to a real team (scored 8/13
+                                     on the checklist as it stood then)
 templates/orchestrator.md            lead agent definition — routing, fan-out, partial handling
 templates/writer-agent.md            implementer definition — budget, discipline, DoD
 templates/reviewer-agent.md          read-only gate definition
 templates/shared-discipline.md       the block to paste into your project instruction file
 hooks/subagent-return-contract.py    stop-hook enforcing conclusion-only reports
 scripts/measure-agent-team.py        reproduce every number in this document
+tests/test_hook.py                   behavioural tests for the stop-hook (12 cases)
+tests/test_measure.py                unit tests for the measurement script (13 cases)
 ```
 
 Start here:
@@ -1258,6 +1271,15 @@ everything else as optional. A reviewer that returns `PASS` with no findings is 
   as valid designs rather than picking a winner, because the evidence supports both.
 - Rules that failed are in §7. An earlier draft's misattribution is corrected in §5.4 and §7
   rather than quietly deleted.
+- **A counting defect was found and corrected on 2026-08-11.** Turn counts previously
+  counted transcript *lines* — one per content block — rather than API turns, inflating
+  every turn figure roughly 2×. All turn numbers here and in `docs/measurements.md` were
+  recomputed from the same transcripts with the corrected script, whose behaviour is now
+  pinned by `tests/test_measure.py`. No other metric was affected. One secondary claim did
+  reverse: after the discipline rules almost no agent exceeds 50 real turns (3–5%, not
+  "66%"), so the danger of a low cap concentrates on undisciplined teams — which is where
+  §6.1 already aimed it. The headline kill-rate fell from "64%" to one in five (one in
+  three pre-discipline).
 
 All identifying details — accounts, hostnames, addresses, internal project names — have been
 removed. The engineering content is unchanged.

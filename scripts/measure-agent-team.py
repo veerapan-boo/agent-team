@@ -32,6 +32,11 @@ Measurement notes (these matter -- getting them wrong changes the conclusions)
 * output_tokens are de-duplicated by message.id, keeping the maximum. Streaming
   writes the same assistant message several times with growing usage; summing
   them naively inflates token counts several-fold.
+* turns are de-duplicated by message.id too. A transcript writes one line per
+  CONTENT BLOCK (thinking on one line, tool_use on the next, same id), so
+  counting assistant lines inflates turn counts roughly 2x. One distinct id =
+  one API response; maxTurns counts tool-use turns, so this figure over-counts
+  it by about one (the final report message carries no tool call).
 * A re-read counts as wasteful only within a single agent AND only when no edit
   to that path happened in between. Counting duplicates across agents produces a
   ~70% "waste" figure that is not waste -- different agents legitimately need the
@@ -60,7 +65,11 @@ EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 
 
 def parse_ts(value: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        # a bare --split-at value (no Z, no offset) means UTC
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed
 
 
 def read_jsonl(path: str) -> list[dict]:
@@ -110,7 +119,8 @@ def load_agent(meta_path: str, idle_gap: float) -> dict | None:
     out_anon = 0
     cache_read = 0
     cache_write = 0
-    turns = 0
+    turn_ids: set[str] = set()
+    anon_turns = 0
     tools: collections.Counter = collections.Counter()
     reads = 0
     stale_reads = 0
@@ -121,15 +131,16 @@ def load_agent(meta_path: str, idle_gap: float) -> dict | None:
     for event in events:
         if event.get("type") != "assistant":
             continue
-        turns += 1
         message = event.get("message") or {}
         usage = message.get("usage") or {}
 
         msg_id = message.get("id")
         tokens = usage.get("output_tokens", 0) or 0
         if msg_id:
+            turn_ids.add(msg_id)
             out_by_id[msg_id] = max(out_by_id.get(msg_id, 0), tokens)
         else:
+            anon_turns += 1
             out_anon += tokens
 
         cache_read += usage.get("cache_read_input_tokens", 0) or 0
@@ -187,7 +198,7 @@ def load_agent(meta_path: str, idle_gap: float) -> dict | None:
         "start": times[0],
         "end": times[-1],
         "duration": (times[-1] - times[0]).total_seconds(),
-        "turns": turns,
+        "turns": len(turn_ids) + anon_turns,
         "out": sum(out_by_id.values()) + out_anon,
         "cache_read": cache_read,
         "cache_write": cache_write,
@@ -281,13 +292,18 @@ def declared_tools(agents_dir: str) -> dict[str, set[str]]:
         if not text.startswith("---"):
             continue
         front = text.split("---", 2)[1] if text.count("---") >= 2 else ""
-        m = re.search(r"^tools:\s*(.+)$", front, re.M)
-        if not m:
-            continue
-        # collapse Agent(a, b, c) so its comma list is not split
-        raw = re.sub(r"Agent\([^)]*\)", "Agent", m.group(1))
         name = os.path.basename(path)[:-3]
-        out[name] = {t.strip() for t in raw.split(",") if t.strip()}
+        m = re.search(r"^tools:[ \t]*(\S.*)$", front, re.M)
+        if m:
+            # collapse Agent(a, b, c) so its comma list is not split
+            raw = re.sub(r"Agent\([^)]*\)", "Agent", m.group(1))
+            out[name] = {t.strip() for t in raw.split(",") if t.strip()}
+            continue
+        # YAML block-list form:  tools:\n  - Read\n  - Edit
+        m = re.search(r"^tools:[ \t]*\n((?:[ \t]+-[ \t]*\S.*\n?)+)", front, re.M)
+        if m:
+            out[name] = {ln.strip().lstrip("-").strip()
+                         for ln in m.group(1).splitlines() if ln.strip()}
     return out
 
 
@@ -366,6 +382,9 @@ def by_agent(agents: list[dict], agents_dir: str) -> None:
         print("\n  A read-only reviewer holding an unused edit tool forfeits the only hard,")
         print("  tool-level guarantee available. A tool used but not declared is a typo the")
         print("  model made, or a tool it needed and did not have. Both are defects.")
+        print("  Caveat: this compares today's definitions against the whole transcript")
+        print("  history. A definition edited after old runs flags those runs falsely --")
+        print("  check the definition's change history before acting on a finding.")
 
 
 def detail(agents: list[dict]) -> None:
