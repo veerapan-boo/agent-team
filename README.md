@@ -397,6 +397,30 @@ whole screens because of a single shared line.
 Hard constraint: **never fan out two agents that will edit the same file.** Concurrent edits
 to one file lose work.
 
+#### The working tree is one shared file
+
+The file rule above has a blind spot: the git index, stash stack, and HEAD are **one shared
+file that every agent in the project edits**. An agent running `git stash`, `git restore` or
+`git reset` sweeps up a sibling's uncommitted work mid-wave — no error, no report, the
+orchestrator never knows. Observed in a measured session: a deploy agent ran
+`git restore <paths>` while a writer was mid-run.
+
+The fix has the same two layers a human team uses for a shared branch:
+
+- **Prevention.** Git state operations belong to one designated role, spawned **alone**
+  between waves — routing through the lead *is* the announcement. Writers never mutate git
+  state at all; a writer that thinks it needs a stash has a scoping problem and reports
+  `BLOCKED:` with the exact command instead of running it.
+- **Declaration.** Every writer report carries a `Git:` line (`none` expected). The lead
+  verifies `git status` and `git stash list` after any declared mutation or `BLOCKED:`
+  report — and treats an *undeclared* mutation as an incident: halt fan-out, establish what
+  was lost, surface it to the human.
+
+Prose asks; a hook enforces (§5.9). [`hooks/git-state-guard.py`](hooks/git-state-guard.py)
+is a PreToolUse guard that blocks state-mutating git commands from non-exempt subagents,
+matched at command position — a `grep` whose *pattern* contains "git checkout" passes,
+because that false positive really occurred.
+
 #### What it looks like when it works
 
 The measured timeline is charted at the top of this document under
@@ -975,6 +999,7 @@ Each of these was observed and cost measurable time.
 | **Fabricated identifier** | agent writes a function/field/flag name it never read | 4 rework agents | §5.7 last row |
 | **Unverified "done"** | reports success without running the build | 3 rework agents, ~1.4 h total | §5.6 |
 | **Serial-by-habit** | spawning independent tasks one at a time | 20 min where 7 would do; 12 min where 6 would do | §5.3 |
+| **Shared git-state mutation** | `git stash`/`restore`/`reset` while sibling agents run | a sibling's uncommitted work silently destroyed; observed: deploy restored paths mid-wave | §5.3 |
 | **Mega-brief** | one task spanning several screens and configs | 159 round trips, 42 min | §5.5 |
 | **Routine reviewer tail** | a review agent appended to every task *that already self-verifies* | ~9 min per two phases, zero new information | §5.6 |
 | **Broken reference** | an agent definition names a mandatory skill, tool, script, or path that does not exist | verification silently never happens | §9.1 |
@@ -1047,6 +1072,8 @@ Run after any burst of agent-file edits, and at minimum monthly.
 - [ ] You know **which three roles account for ~90% of your tokens**, and your tuning effort
       is aimed at them (§5.14).
 - [ ] Fan-out is bounded at roughly **5 concurrent agents** (§12).
+- [ ] Writers **cannot mutate shared git state** — the git-state guard hook is wired, and
+      every exempt role (commit / release) is spawned alone, never inside a wave (§5.3).
 - [ ] Tool **descriptions** are unambiguous enough that a human could pick the right tool from
       them alone (§12).
 - [ ] The **soft budget and partial-report protocol** appear in every writer's definition,
@@ -1108,9 +1135,11 @@ templates/writer-agent.md            implementer definition — budget, discipli
 templates/reviewer-agent.md          read-only gate definition
 templates/shared-discipline.md       the block to paste into your project instruction file
 hooks/subagent-return-contract.py    stop-hook enforcing conclusion-only reports
+hooks/git-state-guard.py             PreToolUse guard: writers cannot mutate shared git state
 scripts/measure-agent-team.py        reproduce every number in this document
 tests/test_hook.py                   behavioural tests for the stop-hook (12 cases)
 tests/test_measure.py                unit tests for the measurement script (13 cases)
+tests/test_git_guard.py              behavioural tests for the git-state guard (19 cases)
 ```
 
 Start here:

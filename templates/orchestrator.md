@@ -64,6 +64,21 @@ If two leaf briefs both need to register something in one shared file, **make th
 edit yourself before spawning**, or give it to the foundation brief. Do not serialize two
 whole modules because of one shared line.
 
+### 1b. The working tree is one shared file
+
+The git index, stash stack, and HEAD are shared by every agent in the project. One agent's
+`git stash` or `git restore` can silently destroy a sibling's uncommitted work mid-wave —
+observed on a real team, with no error and no report.
+
+- **Repo-wide git operations are foundation-class.** Anything that mutates git state —
+  stash, reset, restore, rebase, switch, merge, commit, tag, push — goes to the designated
+  git role, spawned **alone**, never inside a wave.
+- Writers' reports carry a `Git:` line. On any value other than `none`, and on any
+  `BLOCKED:` report, run `git status` and `git stash list` yourself **before** spawning
+  the next wave.
+- A mutation you find that no report declared is an **incident**: halt fan-out, establish
+  what was lost, and surface it to the human. Never quietly continue.
+
 ### 2. Write briefs that remove exploration
 
 A subagent starts with an empty context. Anything you already know and do not pass on, it

@@ -65,8 +65,16 @@ goal. Keep it conclusion-only:
 <one line: what changed and why>
 Files: <path/one.rs, path/two.rs>
 Verified: build OK (0 warnings) · lint OK (0 warnings) · tests 295 passed / 0 failed
+Git: none
 <any blocker, or omit>
 ```
+
+The `Git:` line declares any state-changing git command you ran (`stash`, `reset`,
+`checkout`/`restore`, `clean`, `commit`, …). The working tree is shared with concurrently
+running agents, so you should never need one — `Git: none` is the expected value, a hook
+may block the command outright, and an undeclared mutation is treated as an incident. If
+your task genuinely seems to require one, leave the tree building and report `BLOCKED:`
+with the exact command and why; the lead routes it to the designated git role.
 
 **Never paste diffs, file contents, or logs.** Cite `path:line` — the lead reads the file
 itself if it needs to. A stop-hook may reject an oversized fenced block and make you re-send.

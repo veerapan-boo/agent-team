@@ -72,6 +72,23 @@ every agent that needs the whole concept, and saves no input tokens.
     subagent's context automatically; an agent definition that repeats this section makes
     each spawn pay for it twice. Agent files link here, they do not restate it.
 
+### Git discipline (shared working tree)
+
+The working tree, index, stash stack, and HEAD are **one shared file that every
+concurrently running agent edits**. A `git stash` or `git restore` here can silently
+destroy a sibling agent's uncommitted work -- this has actually happened.
+
+- **Never mutate shared git state**: no `stash`, `reset`, `checkout`/`restore` of paths,
+  `clean`, `rebase`, `merge`, `switch`, `cherry-pick`, `revert`, `commit`, `add`, `rm`,
+  `mv`, `push`, `pull`, or `tag`. Read-only git (`status`, `diff`, `log`, `show`,
+  `blame`, `stash list`) is always fine.
+- Git state operations belong to **one designated role**, and the lead spawns that role
+  **alone** -- never inside a wave.
+- If your task seems to require a state change, that is a scoping failure, not a reason
+  to run it: leave the tree building and report `BLOCKED:` with the exact command and why.
+- **Declare any state-changing git command you did run** on your report's `Git:` line.
+  `Git: none` is the expected value; an undeclared mutation is treated as an incident.
+
 ### Definition of Done (every code-writing agent)
 
 Run these **inside your own agent**, before reporting -- not in a later verification pass:
