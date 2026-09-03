@@ -755,6 +755,50 @@ runtime rather than in the definition. The check is the same shape and just as c
 tool name appearing in a transcript that is not in that agent's declared list is a defect** —
 either a typo the model made, or a tool it needed and did not have. Both are worth knowing.
 
+### 5.16 Tool coverage gap: cross-agent and cross-session messaging
+
+§5.15 audits tools an agent declares but never calls. The opposite gap is just as costly and
+easier to miss entirely: a tool the team needs that **no agent definition names at all.**
+
+In Claude Code, three tools cover this, and none are granted just because an agent can spawn
+others:
+
+| Tool | What it does | Why it goes missing |
+|---|---|---|
+| `SendMessage` | address another agent directly by name — a spawned subagent, a persistent teammate, a peer subagent, or a session this agent never spawned at all (another local session on the machine, a cloud run, another Remote Control session on the account) — instead of only returning through the spawn call | it is commonly a **deferred** tool: only its bare name is advertised in context, and calling it before its schema is fetched fails |
+| `ListAgents` | enumerates who is currently addressable, so `SendMessage` has a real name to target | an agent never told this exists has no way to discover a peer it did not spawn itself |
+| `ToolSearch` | fetches the full schema for a deferred tool by name, making it callable | an agent never told deferred tools exist has no reason to call this first |
+
+**Grant it, both directions.** The lead is not limited to the tree it spawned — carry
+`ListAgents` + `SendMessage` so it can reach, and be reached by, sessions outside its own spawn
+call: another local session, a cloud run, another Remote Control session on the same account.
+A subagent that can usefully coordinate with a sibling should carry the same pair rather than
+being forced to round-trip every exchange through the lead. Withholding the tool does not
+protect the ownership guarantee in §5.10/§5.11 — the git-state guard hook already enforces that
+at the point it actually matters, a write, regardless of who talked to whom first. A team
+should not confuse "agents can't coordinate" with "agents can't collide" — the first is not a
+safety property, it is just agents working blind.
+
+**The one rule messaging does not get to break.** A message may carry information, a status
+update, a question, a heads-up before touching a shared boundary — never a silent
+file-ownership hand-off. "You take this file, I'll take that one" is a scope decision; make it
+through the lead or the ownership table, not through a side channel the lead never sees. The
+failure this guards against isn't "agents talked" — it's "agents agreed to something and the
+one place that synthesises the whole goal never found out."
+
+**The failure mode, when it does go wrong, is silent — same signature as §6.** An agent whose
+context lists `SendMessage`/`ListAgents` only as bare deferred names, with nothing in its brief
+saying they exist or when to use them, will never call `ToolSearch` for them. On the transcript
+this looks identical to not having the tools at all: no error, no attempted call, just
+coordination that should have happened and did not. State the tool names and the occasion to
+use them explicitly in the role's own instructions — do not rely on the model noticing an
+unexplained name in a system reminder.
+
+**Not yet measured.** Unlike the rest of §5, this gap was identified from the tool surface
+itself, not from transcripts of a team running it — no session studied here declared any of
+these three tools. Treat the guidance above as a starting design, and fold in real measurements
+once a team wires it.
+
 ## 6. Runtime mechanics that silently eat finished work
 
 These three share a signature: **something works exactly as specified, and it changes
@@ -878,6 +922,9 @@ mapped, and **produced nothing for 23 minutes** until a human asked why it was q
    returns nothing, verify the world directly: version-control status shows what a writer
    changed, and the agent's own transcript on disk holds its final report as the last
    assistant message. A missing tool is never a reason to stop.
+   In Claude Code that collection tool is `SendMessage` (paired with `ListAgents` to find the
+   name to target), and both are commonly **deferred** — see §5.16 before assuming the lead's
+   instructions even need to name them as unavailable.
 5. **Make the report a completeness check.** Require the lead to list every agent it spawned
    this turn, with each one's verification result. An agent missing from that list was never
    collected — and the lead notices while it can still act.
@@ -1013,6 +1060,7 @@ Each of these was observed and cost measurable time.
 | **Rule written, not deployed** | editing an agent definition mid-session and assuming it applies | a whole era of measurement with zero structural change | §6.3 |
 | **Over-provisioned agent** | a reviewer holding edit tools it never uses | forfeits the only hard tool-level guarantee you have | §5.15 |
 | **Copied tool list** | `Glob` declared by four agents, called by none | schema tokens on every run, and a signal nobody chose the list | §5.15 |
+| **Coordination tool never declared** | no role's brief names `SendMessage`/`ListAgents`/`ToolSearch`, so coordination — with a peer or with a session outside the spawn tree — silently doesn't happen | same signature as an uncollected agent — no error, just missing coordination | §5.16 |
 | **Wrong-case tool name** | the model calls `bash` when the tool is `Bash` | a silently wasted round trip | §5.15 |
 | **Expensive role doing cheap work** | a planner discovering files a scout could have mapped | planner tokens cost 5× scout tokens | §5.14 |
 | **Flat budget for every task** | the same tool-call budget for a typo fix and a migration | over-serves trivial work, under-serves real work | §12 |
@@ -1042,7 +1090,26 @@ The class is broader than skills. Anything an agent definition names by identifi
 - a script path that moved,
 - a hook documented in the team file but never wired in the configuration (§5.13),
 - an agent named in the lead's routing table that no longer exists,
-- a make target, npm script, or test command that was renamed.
+- a make target, npm script, or test command that was renamed,
+- **a tool named in a `tools:` list that this build of the runtime does not actually
+  provide.**
+
+That last one is not hypothetical. `Glob` and `Grep` — named in every template in this repo,
+and in the topology table in §8 — were checked against the runtime this section was written
+in: absent as a top-level tool, and absent from the deferred-tool list too, confirmed with the
+same instrument (not a silent miss — a known-present tool, `SendMessage`, was checked first and
+found, so the absence of the other two is real). File search in that build runs through `Bash`
+instead.
+
+This is a worse case than the skill example, not a milder one: the lead template in this repo
+carries no `Bash` at all, only `Read, Glob, Grep`. If the latter two do not resolve on a given
+build, the lead is left with **no working search tool whatsoever** — while its own instructions
+above still say "search before delegating." Nothing errors. The lead just cannot do the thing
+its brief tells it to do, and nothing in the transcript says why.
+
+**Tool names are not portable across runtimes or even across builds of the same one.** Verify
+every name in a `tools:` list against your actual build before trusting an inherited template —
+including the ones in this repo.
 
 **The check is mechanical.** Extract every identifier your agent definitions name as
 mandatory, and assert each one resolves. It takes seconds and it is the only defect here that
@@ -1069,6 +1136,9 @@ Run after any burst of agent-file edits, and at minimum monthly.
       reviewer holds an edit tool (§5.15).
 - [ ] **No tool name appears in a transcript that is absent from that agent's list** — a typo
       or a missing tool, both worth fixing (§5.15).
+- [ ] Any role that should message a peer, a persistent teammate, or a session outside its own
+      spawn tree has its brief **name the tools** (`SendMessage`, `ListAgents`) and the fetch
+      step (`ToolSearch`) explicitly — not left to an unexplained deferred-tool listing (§5.16).
 - [ ] You know **which three roles account for ~90% of your tokens**, and your tuning effort
       is aimed at them (§5.14).
 - [ ] Fan-out is bounded at roughly **5 concurrent agents** (§12).
@@ -1082,7 +1152,8 @@ Run after any burst of agent-file edits, and at minimum monthly.
       writer runs the checks itself, or a read-only gate does with a written failure route.
       Not half of each.
 - [ ] **Every identifier an agent definition names as mandatory resolves** — skills, scripts,
-      hooks, agent names, build targets (§9.1).
+      hooks, agent names, build targets, **and every tool name in every `tools:` list**,
+      checked against the actual build, not memory of an older one (§9.1).
 - [ ] **Flow diagrams agree with prose rules** — grep for the rule's keywords across the
       whole file (§5.6).
 - [ ] The **file-ownership table** covers every ambiguous path, including name twins (§5.10).
