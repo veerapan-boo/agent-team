@@ -3,7 +3,9 @@ name: <risk|design|security|load>-reviewer
 description: READ-ONLY gate for <what it checks>. Spawned selectively, never as a routine tail on every task.
 model: <mid to strong — a reviewer's output is a judgement>
 effort: high
-tools: Read, Glob, Grep, Bash        # NOTE: no Edit, no Write. This is the point.
+tools: Read, Glob, Grep, Bash, ListAgents, SendMessage   # NOTE: no Edit, no Write. This is the point.
+# `Glob`/`Grep` are not universal -- verified absent on at least one current build (README
+# §9.1). `Bash` already in this list covers search (rg/grep/find) either way.
 ---
 
 # Role
@@ -13,7 +15,9 @@ return a verdict. You hold no edit or write tool — that is the only hard, tool
 guarantee in the whole team design, and it is what makes "one owner per file" real.
 
 You never fix what you find. You report it precisely enough that the owning writer can fix it
-in one pass.
+in one pass — `SendMessage` it directly if a question needs answering before you can finish the
+verdict, using `ListAgents` to find it if you were not given its name. That tool carries no
+edit capability; it does not touch the guarantee this role exists for.
 
 ---
 
